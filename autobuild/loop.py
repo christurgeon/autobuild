@@ -11,6 +11,8 @@ Ports loop.sh, with the audit's corruption/hang fixes:
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import subprocess
 import time
@@ -20,7 +22,7 @@ from shutil import which
 
 from .config import Config
 from .paths import Paths
-from .scheduler import backlog_lock, claim_tasks, runnable_tasks
+from .scheduler import backlog_lock, claim_tasks, runnable_tasks, stuck_tasks
 from .session import RunningSession, spawn_session, write_sentinel
 from .tasks import (
     create_task_file,
@@ -56,9 +58,53 @@ def _now() -> str:
 
 def _read_json(path: Path) -> dict | None:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        text = path.read_text(encoding="utf-8")
+    except OSError:
         return None
+    try:
+        return json.loads(text)
+    except ValueError:
+        # Tolerate trailing data after a valid JSON object — agents sometimes append
+        # stray output (e.g. a closing tag) after the sentinel. Salvage the leading
+        # object so a task that genuinely finished is not silently stranded. A truly
+        # torn/partial write (no complete leading object) still returns None and is
+        # retried next pass.
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(text.lstrip())
+        except ValueError:
+            return None
+        return obj if isinstance(obj, dict) else None
+
+
+# --- run lock ----------------------------------------------------------------
+
+class RunLockHeld(RuntimeError):
+    """Raised when the advisory run lock is already held — i.e. another
+    `autobuild run` owns this project. str() is the lock file path."""
+
+
+@contextlib.contextmanager
+def run_lock(lock_file: Path):
+    """Hold the project's exclusive run lock for the duration of the with-block.
+
+    A single `run` owns the lock for its whole lifetime; this is what lets
+    `reconcile()` safely BLOCK orphaned in-progress sessions (the lock proves no
+    other process is driving them). Acquisition is non-blocking: if another holder
+    has it, raise RunLockHeld immediately rather than waiting. The lock is an
+    fcntl.flock, so the kernel releases it automatically if the holder dies — the
+    exact crash semantic we want, with no stale-PID games."""
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    f = open(lock_file, "w")
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        f.close()
+        raise RunLockHeld(str(lock_file)) from e
+    try:
+        yield
+    finally:
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        f.close()
 
 
 # --- integration -------------------------------------------------------------
@@ -100,6 +146,44 @@ def integrate(tid: str, config: Config, paths: Paths) -> tuple[bool, str]:
         return False, f"auto-merge conflict for {branch}"
 
     return False, f"unknown integration mode '{mode}'"
+
+
+# --- verification gate -------------------------------------------------------
+
+def _write_checks_log(sdir: Path, cmd: str, code: int, stdout: str, stderr: str) -> None:
+    """Persist why verification failed: the command, its exit code, and the tail of
+    its combined output (last 50 lines) so a human can inspect without re-running."""
+    tail = "\n".join(((stdout or "") + (stderr or "")).splitlines()[-50:])
+    (sdir / "checks.log").write_text(
+        f"command: {cmd}\nexit: {code}\n\n--- output (tail) ---\n{tail}\n",
+        encoding="utf-8",
+    )
+
+
+def verify_checks(config: Config, paths: Paths, sdir: Path, sid: str) -> tuple[bool, str]:
+    """Re-run config.checks against the session's worktree before integrating —
+    the harness's own verification of a COMPLETE, not the agent's self-report.
+
+    Returns (passed, outcome) where outcome is one of "skipped" (verification
+    disabled or no checks), "passed", or "failed: <cmd>". Stops at the first failing
+    command and writes <sdir>/checks.log. A missing worktree is treated as a failure:
+    we cannot verify the tree, so we refuse to trust it."""
+    if not config.verify_checks or not config.checks:
+        return True, "skipped"
+
+    worktree = paths.worktrees_dir / sid
+    if not worktree.is_dir():
+        _write_checks_log(sdir, "(pre-flight)", -1, "",
+                          f"worktree {worktree} is missing; cannot verify checks")
+        return False, "failed: worktree missing"
+
+    for cmd in config.checks:
+        r = subprocess.run(cmd, shell=True, cwd=str(worktree),
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            _write_checks_log(sdir, cmd, r.returncode, r.stdout, r.stderr)
+            return False, f"failed: {cmd}"
+    return True, "passed"
 
 
 # --- follow-ups --------------------------------------------------------------
@@ -147,19 +231,31 @@ def reap_session(sdir: Path, config: Config, paths: Paths) -> bool:
     task = task_index(paths.tasks_dir).get(tid)
     integrated = False
     followups: list[str] = []
+    checks_outcome = "n/a"
 
     if status == "COMPLETE":
-        success, detail = integrate(tid, config, paths)
-        if success:
-            if task:
-                set_status(task.path, "done")
-            integrated = True
-            ok(f"{sid}: {tid} COMPLETE — {detail}")
-        else:
+        # Trust, but verify: re-run the checks against the committed tree ourselves
+        # before integrating. A tree that fails verification is blocked, not merged.
+        verified, checks_outcome = verify_checks(config, paths, sdir, sid)
+        if not verified:
             if task:
                 set_status(task.path, "blocked")
-            warn(f"{sid}: {tid} integration failed — {detail}")
-        followups = file_followups(result, sdir, paths)
+            warn(f"{sid}: {tid} verification {checks_outcome} — not integrated; "
+                 f"branch {branch_name(tid)} kept (see {sdir / 'checks.log'})")
+            # No follow-ups: a tree that fails checks did not meet the contract, so
+            # its self-reported follow-ups are part of the same untrusted output.
+        else:
+            success, detail = integrate(tid, config, paths)
+            if success:
+                if task:
+                    set_status(task.path, "done")
+                integrated = True
+                ok(f"{sid}: {tid} COMPLETE — {detail}")
+            else:
+                if task:
+                    set_status(task.path, "blocked")
+                warn(f"{sid}: {tid} integration failed — {detail}")
+            followups = file_followups(result, sdir, paths)
     elif status == "BLOCKED":
         if task:
             set_status(task.path, "blocked")
@@ -174,7 +270,8 @@ def reap_session(sdir: Path, config: Config, paths: Paths) -> bool:
 
     remove_worktree(paths, sid)
     (sdir / "reaped.json").write_text(json.dumps(
-        {"reaped_at": _now(), "status": status, "integrated": integrated, "followups": followups},
+        {"reaped_at": _now(), "status": status, "integrated": integrated,
+         "checks": checks_outcome, "followups": followups},
         indent=2,
     ), encoding="utf-8")
     return True
@@ -204,38 +301,91 @@ def reap_stalled(running: list[RunningSession], paths: Paths) -> None:
 
 # --- reconcile (startup crash recovery) -------------------------------------
 
-def reconcile(paths: Paths) -> None:
+def reconcile(paths: Paths, *, sweep_in_progress: bool = False) -> None:
     """Restore resume-ability after a `run` crash. Orphaned `claimed` tasks (claim
-    succeeded, spawn never finished) go back to `todo`; orphaned `in-progress`
-    sessions (no live process, no result) get a BLOCKED sentinel for the reaper."""
+    succeeded, spawn never finished) go back to `todo`.
+
+    The orphaned `in-progress` -> BLOCKED sweep is gated on `sweep_in_progress`,
+    which the caller sets only when it holds the run lock. Without the lock we
+    cannot tell a genuinely orphaned session from one a *concurrent* live run is
+    actively driving (its child process is invisible to us), so a reap that runs
+    alongside a run must NOT sweep — doing so would BLOCK live sessions and remove
+    their worktrees out from under the run. A fresh `run` (or a `reap` that can
+    take the lock) holds it, proving no other process owns these sessions, and
+    sweeps as before."""
     for t in iter_tasks(paths.tasks_dir):
         if t.status == "claimed":
             set_status(t.path, "todo")
 
-    index = task_index(paths.tasks_dir)
-    if paths.sessions_dir.is_dir():
-        for sdir in sorted(paths.sessions_dir.iterdir()):
-            if not sdir.is_dir():
-                continue
-            if (sdir / "result.json").exists() or (sdir / "reaped.json").exists():
-                continue
-            meta = _read_json(sdir / "meta.json")
-            if not meta:
-                continue
-            tid = str(meta.get("task", ""))
-            task = index.get(tid)
-            if task and task.status == "in-progress":
-                warn(f"orphaned in-progress session {sdir.name}; marking {tid} BLOCKED")
-                write_sentinel(sdir, tid, "BLOCKED",
-                               "orphaned: run restarted while session was in-progress; "
-                               "no result.json was written")
+    if sweep_in_progress:
+        index = task_index(paths.tasks_dir)
+        if paths.sessions_dir.is_dir():
+            for sdir in sorted(paths.sessions_dir.iterdir()):
+                if not sdir.is_dir():
+                    continue
+                if (sdir / "result.json").exists() or (sdir / "reaped.json").exists():
+                    continue
+                meta = _read_json(sdir / "meta.json")
+                if not meta:
+                    continue
+                tid = str(meta.get("task", ""))
+                task = index.get(tid)
+                if task and task.status == "in-progress":
+                    warn(f"orphaned in-progress session {sdir.name}; marking {tid} BLOCKED")
+                    write_sentinel(sdir, tid, "BLOCKED",
+                                   "orphaned: run restarted while session was in-progress; "
+                                   "no result.json was written")
     prune_worktrees(paths)
+
+
+def reap(paths: Paths, config: Config) -> None:
+    """One-shot reap. If the run lock is free (no active run) we take it and do the
+    full crash-recovery reconcile, exactly as a fresh `run` would. If a run holds
+    it, we skip the in-progress sweep entirely and only collect finished sentinels
+    — idempotent result.json handling that never touches the live run's sessions."""
+    paths.ensure_runtime_dirs()
+    try:
+        with run_lock(paths.run_lock):
+            reconcile(paths, sweep_in_progress=True)
+            reap_all(config, paths)
+    except RunLockHeld:
+        warn("an 'autobuild run' is active (holds run.lock); collecting finished "
+             "sessions only, leaving its in-progress sessions alone")
+        reap_all(config, paths)
+    status(paths, config)
 
 
 # --- outer loop --------------------------------------------------------------
 
 def _active(running: list[RunningSession]) -> list[RunningSession]:
     return [rs for rs in running if not rs.has_result() and rs.alive()]
+
+
+def _harvest(running: list[RunningSession], config: Config, paths: Paths) -> list[RunningSession]:
+    """Reap finished sessions, BLOCK exited-without-result ones, and return the
+    still-running survivors.
+
+    A session is never dropped from tracking without first being reaped or stalled.
+    This closes the race where a session's process exits in the window between a
+    bare `reap_stalled` and a liveness filter: such a session used to be silently
+    dropped, leaving a valid result.json unreaped (task stuck in-progress forever).
+    """
+    survivors: list[RunningSession] = []
+    for rs in running:
+        if rs.has_result():
+            continue  # finished; the reap_all below acts on its sentinel
+        if rs.alive():
+            survivors.append(rs)
+            continue
+        # The process exited without a result. Re-check first: it may have written
+        # the sentinel just before exiting (the contract is write-then-exit), in
+        # which case reap_all handles it; only a genuinely empty exit is BLOCKED.
+        if not rs.has_result():
+            warn(f"{rs.sid} exited without a result; marking {rs.tid} BLOCKED")
+            write_sentinel(rs.sdir, rs.tid, "BLOCKED",
+                           "session process exited without writing result.json")
+    reap_all(config, paths)
+    return survivors
 
 
 def _wait_any(running: list[RunningSession], timeout: float) -> None:
@@ -249,9 +399,18 @@ def _wait_any(running: list[RunningSession], timeout: float) -> None:
 
 
 def run(paths: Paths, config: Config, *, sleep_seconds: float = 2.0) -> None:
+    """Drive the outer loop until the backlog drains. Holds the run lock for the
+    whole lifetime: a second `run` is refused (RunLockHeld) and a `reap` running
+    alongside this one cannot reconcile the sessions this run owns. Because we hold
+    the lock, the startup reconcile is free to BLOCK genuinely orphaned sessions."""
+    with run_lock(paths.run_lock):
+        _run_locked(paths, config, sleep_seconds=sleep_seconds)
+
+
+def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float) -> None:
     paths.ensure_runtime_dirs()
     log(f"starting loop (max_parallel={config.max_parallel}, max_iterations={config.max_iterations})")
-    reconcile(paths)
+    reconcile(paths, sweep_in_progress=True)
 
     running: list[RunningSession] = []
     iteration = 0
@@ -261,9 +420,7 @@ def run(paths: Paths, config: Config, *, sleep_seconds: float = 2.0) -> None:
             warn(f"hit max_iterations ({config.max_iterations}); stopping")
             break
 
-        reap_stalled(running, paths)
-        reaped = reap_all(config, paths)
-        running = _active(running)
+        running = _harvest(running, config, paths)
 
         free = config.max_parallel - len(running)
         claimed = claim_tasks(free, paths) if free > 0 else []
@@ -271,20 +428,34 @@ def run(paths: Paths, config: Config, *, sleep_seconds: float = 2.0) -> None:
             rs = spawn_session(t, config, paths)
             log(f"spawn {rs.sid} -> {rs.tid}")
             running.append(rs)
-        running = _active(running)
+
+        # Final harvest before deciding the backlog is settled: a session that
+        # finishes in this window must be reaped here, not silently stranded.
+        running = _harvest(running, config, paths)
 
         if not running:
-            pending = [t for t in iter_tasks(paths.tasks_dir) if not is_terminal(t.status)]
+            tasks = iter_tasks(paths.tasks_dir)
+            pending = [t for t in tasks if not is_terminal(t.status)]
             if not pending:
                 ok("backlog drained — COMPLETE")
             else:
-                blocked = sum(1 for t in pending if t.status == "blocked")
-                warn(f"backlog settled with {len(pending)} unfinished task(s) "
-                     f"({blocked} blocked) — see 'autobuild status'")
+                stuck = stuck_tasks(tasks, {t.id: t for t in tasks})
+                if stuck:
+                    warn(f"backlog settled: {len(stuck)} task(s) cannot proceed:")
+                    for tid in sorted(stuck):
+                        warn(f"  {tid}: {stuck[tid]}")
+                    other = len(pending) - len(stuck)
+                    if other:
+                        warn(f"  ...plus {other} other unfinished task(s) — see 'autobuild status'")
+                else:
+                    warn(f"backlog settled with {len(pending)} unfinished task(s) "
+                         f"— see 'autobuild status'")
             break
 
-        if reaped == 0 and not claimed:
-            # nothing progressed this pass; block until a running session finishes
+        if not claimed:
+            # No new work to start this pass (at capacity, or nothing runnable yet).
+            # Block until a running session finishes rather than busy-spinning. If a
+            # reap had unblocked a task, claim_tasks above would have claimed it.
             _wait_any(running, timeout=sleep_seconds)
 
     status(paths, config)
@@ -297,6 +468,9 @@ def collect_status(paths: Paths) -> dict:
     counts: dict[str, int] = {}
     for t in tasks:
         counts[t.status] = counts.get(t.status, 0) + 1
+
+    stuck = stuck_tasks(tasks, {t.id: t for t in tasks})
+    stuck_list = [{"task": tid, "reason": stuck[tid]} for tid in sorted(stuck)]
 
     sessions = []
     if paths.sessions_dir.is_dir():
@@ -315,7 +489,7 @@ def collect_status(paths: Paths) -> dict:
     branches = [ln.strip("* ").strip() for ln in br.stdout.splitlines() if ln.strip()]
 
     return {"counts": counts, "tasks": tasks, "sessions": sessions,
-            "worktrees": worktrees, "branches": branches}
+            "worktrees": worktrees, "branches": branches, "stuck": stuck_list}
 
 
 def status(paths: Paths, config: Config) -> dict:
@@ -329,6 +503,11 @@ def status(paths: Paths, config: Config) -> dict:
     print(f"\n{_c('1;37')}TASKS{_c('0')}")
     for t in report["tasks"]:
         print(f"  {t.id:<12} p{t.priority:<3} {t.status:<12} {t.title}")
+
+    if report["stuck"]:
+        print(f"\n{_c('1;31')}STUCK{_c('0')}")
+        for s in report["stuck"]:
+            print(f"  {s['task']:<12} {s['reason']}")
 
     print(f"\n{_c('1;37')}SESSIONS{_c('0')}")
     for s in report["sessions"]:

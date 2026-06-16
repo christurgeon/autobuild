@@ -3,6 +3,7 @@ import importlib.resources as ir
 import pytest
 
 from autobuild import cli
+from autobuild import loop as loop_mod
 from autobuild.paths import Paths
 
 
@@ -59,3 +60,28 @@ def test_unknown_command_exits_2(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as e:
         cli.main(["frobnicate"])
     assert e.value.code == 2
+
+
+def test_run_refused_with_nonzero_exit_when_run_lock_held(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    cli.main(["init"])
+    paths = Paths(tmp_path)
+    with loop_mod.run_lock(paths.run_lock):  # simulate another active run
+        rc = cli.main(["run"])
+    assert rc == 1
+    assert "run.lock" in capsys.readouterr().err
+
+
+def test_invalid_config_exits_2_without_spawning(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    cli.main(["init"])
+    paths = Paths(tmp_path)
+    paths.config_file.write_text("integration: prr\nmax_parallel: 0\n", encoding="utf-8")
+
+    assert cli.main(["run"]) == 2
+
+    err = capsys.readouterr().err
+    assert str(paths.config_file) in err
+    assert "integration" in err and "max_parallel" in err
+    # the loop never ran: no session directories were created
+    assert not any(paths.sessions_dir.iterdir())

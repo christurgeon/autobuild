@@ -1,12 +1,18 @@
-"""Config loading. Ports cfg/cfg_list from common.sh, but parses YAML with PyYAML
-instead of grep/sed. Flat schema, all keys optional with the bash defaults."""
+"""Config loading and validation. Ports cfg/cfg_list from common.sh, but parses
+YAML with PyYAML instead of grep/sed. Flat schema, all keys optional with the bash
+defaults. Unlike the bash version, values are validated at load time: every problem
+is aggregated into a single ConfigError so a typo (integration: prr, max_parallel: 0)
+fails fast with an actionable message instead of surfacing later inside the loop."""
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+VALID_INTEGRATIONS = ("pr", "auto-merge", "branch")
 
 
 @dataclass(frozen=True)
@@ -17,24 +23,124 @@ class Config:
     max_iterations: int = 50
     integration: str = "pr"  # pr | auto-merge | branch
     checks: list[str] = field(default_factory=list)
+    verify_checks: bool = True  # re-run checks in the reaper before integrating
     claude_cmd: str = "claude"
 
 
+# Top-level keys autobuild understands. Anything else is a likely typo and warned.
+KNOWN_KEYS = frozenset(Config.__dataclass_fields__)
+
+
+class ConfigError(ValueError):
+    """Raised when config.yml fails validation. Aggregates *all* problems found in
+    one pass so the user can fix everything at once rather than one error per run."""
+
+    def __init__(self, problems: list[str], path: Path | None = None):
+        self.problems = list(problems)
+        self.path = path
+        where = f"invalid config: {path}" if path is not None else "invalid config"
+        super().__init__(where + "\n" + "\n".join(f"  - {p}" for p in self.problems))
+
+
+def _warn(msg: str) -> None:
+    # Printed to stderr (not added to the fatal problem list). Defined locally rather
+    # than imported from loop.py, which already imports this module.
+    print(f"\033[1;33m[warn]\033[0m {msg}", file=sys.stderr)
+
+
 def load_config(path: Path) -> Config:
-    """Read config.yml into a Config, applying defaults for missing keys."""
-    data: dict = {}
-    if path.exists():
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
-        if isinstance(loaded, dict):
-            data = loaded
+    """Read config.yml into a Config, applying defaults for missing keys and
+    validating every present key. Raises ConfigError (aggregating all problems) on
+    invalid input; warns on unknown top-level keys without aborting."""
+    if not path.exists():
+        return Config()
+
+    loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if loaded is None:
+        return Config()
+    if not isinstance(loaded, dict):
+        raise ConfigError(
+            [f"top-level config must be a mapping of key: value "
+             f"(got {type(loaded).__name__})"],
+            path,
+        )
+    data = loaded
+
+    for key in sorted(k for k in data if k not in KNOWN_KEYS):
+        _warn(f"unknown config key '{key}' in {path} (ignored)")
 
     defaults = Config()
+    problems: list[str] = []
+
+    def want_int(key: str, default: int) -> int:
+        if key not in data:
+            return default
+        v = data[key]
+        if isinstance(v, bool) or not isinstance(v, int):
+            problems.append(f"{key} must be an integer >= 1 (got {v!r})")
+            return default
+        if v < 1:
+            problems.append(f"{key} must be >= 1 (got {v})")
+            return default
+        return v
+
+    def want_str(key: str, default: str) -> str:
+        if key not in data:
+            return default
+        v = data[key]
+        if not isinstance(v, str) or not v.strip():
+            problems.append(f"{key} must be a non-empty string (got {v!r})")
+            return default
+        return v
+
+    model = want_str("model", defaults.model)
+    base_branch = want_str("base_branch", defaults.base_branch)
+    claude_cmd = want_str("claude_cmd", defaults.claude_cmd)
+    max_parallel = want_int("max_parallel", defaults.max_parallel)
+    max_iterations = want_int("max_iterations", defaults.max_iterations)
+
+    integration = defaults.integration
+    if "integration" in data:
+        v = data["integration"]
+        if not isinstance(v, str) or v not in VALID_INTEGRATIONS:
+            problems.append(
+                f"integration must be one of {', '.join(VALID_INTEGRATIONS)} "
+                f"(got {v!r})"
+            )
+        else:
+            integration = v
+
+    checks = list(defaults.checks)
+    if data.get("checks") is not None:
+        v = data["checks"]
+        if isinstance(v, str):
+            problems.append(
+                "checks must be a YAML list of commands, not a single string. "
+                f"Write it as:\n      checks:\n        - {v!r}"
+            )
+        elif not isinstance(v, list):
+            problems.append(
+                f"checks must be a list of non-empty strings (got {type(v).__name__})"
+            )
+        else:
+            cleaned: list[str] = []
+            for i, c in enumerate(v):
+                if not isinstance(c, str) or not c.strip():
+                    problems.append(f"checks[{i}] must be a non-empty string (got {c!r})")
+                else:
+                    cleaned.append(c)
+            checks = cleaned
+
+    if problems:
+        raise ConfigError(problems, path)
+
     return Config(
-        model=str(data.get("model", defaults.model)),
-        max_parallel=int(data.get("max_parallel", defaults.max_parallel)),
-        base_branch=str(data.get("base_branch", defaults.base_branch)),
-        max_iterations=int(data.get("max_iterations", defaults.max_iterations)),
-        integration=str(data.get("integration", defaults.integration)),
-        checks=[str(c) for c in (data.get("checks") or [])],
-        claude_cmd=str(data.get("claude_cmd", defaults.claude_cmd)),
+        model=model,
+        max_parallel=max_parallel,
+        base_branch=base_branch,
+        max_iterations=max_iterations,
+        integration=integration,
+        checks=checks,
+        verify_checks=bool(data.get("verify_checks", defaults.verify_checks)),
+        claude_cmd=claude_cmd,
     )

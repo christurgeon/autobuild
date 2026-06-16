@@ -13,8 +13,8 @@ from subprocess import Popen
 
 from .config import Config
 from .paths import Paths
-from .tasks import Task, set_status
-from .worktree import branch_name, make_worktree
+from .tasks import Task, set_status, task_index
+from .worktree import DependencyMergeConflict, branch_name, make_worktree
 
 
 @dataclass
@@ -63,6 +63,15 @@ def write_sentinel(sdir: Path, tid: str, status: str, summary: str,
     )
 
 
+def _done_dependencies(task: Task, paths: Paths) -> list[str]:
+    """Dependency ids whose task is `done`, in declaration order. The scheduler only
+    makes a task runnable once every dep is done, but filter defensively so a direct
+    spawn never tries to layer an unfinished (or missing) dependency."""
+    index = task_index(paths.tasks_dir)
+    return [d for d in task.depends_on
+            if (dep := index.get(d)) is not None and dep.status == "done"]
+
+
 def spawn_session(task: Task, config: Config, paths: Paths) -> RunningSession:
     sid = new_session_id()
     sdir = paths.sessions_dir / sid
@@ -70,7 +79,12 @@ def spawn_session(task: Task, config: Config, paths: Paths) -> RunningSession:
     tid = task.id
 
     try:
-        wt = make_worktree(paths, sid, tid, config.base_branch)
+        wt = make_worktree(paths, sid, tid, config.base_branch,
+                           _done_dependencies(task, paths))
+    except DependencyMergeConflict as exc:
+        set_status(task.path, "blocked")
+        write_sentinel(sdir, tid, "BLOCKED", str(exc))
+        return RunningSession(sid, tid, sdir, None, task, None)
     except Exception:
         set_status(task.path, "blocked")
         write_sentinel(sdir, tid, "BLOCKED",

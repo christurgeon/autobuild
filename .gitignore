@@ -3,6 +3,7 @@
 .autobuild/worktrees/
 .autobuild/.running
 .autobuild/backlog.lock
+.autobuild/run.lock
 
 # editor / OS noise
 .DS_Store

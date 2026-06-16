@@ -7,7 +7,7 @@ import importlib.resources as ir
 import sys
 
 from . import loop as loop_mod
-from .config import load_config
+from .config import ConfigError, load_config
 from .loop import log, ok
 from .paths import Paths
 
@@ -78,16 +78,25 @@ def main(argv: list[str] | None = None) -> int:
         return ab_init(paths)
 
     require_init(paths)
-    config = load_config(paths.config_file)
+    try:
+        config = load_config(paths.config_file)
+    except ConfigError as e:
+        _err(f"invalid configuration in {e.path}:")
+        for problem in e.problems:
+            print(f"  - {problem}", file=sys.stderr)
+        return 2
 
     if args.command == "run":
-        loop_mod.run(paths, config)
+        try:
+            loop_mod.run(paths, config)
+        except loop_mod.RunLockHeld as e:
+            _err(f"another 'autobuild run' is active (holds {e}); refusing to start a "
+                 f"second run. The lock releases automatically when that run exits.")
+            return 1
     elif args.command == "status":
         loop_mod.status(paths, config)
     elif args.command == "reap":
-        loop_mod.reconcile(paths)
-        loop_mod.reap_all(config, paths)
-        loop_mod.status(paths, config)
+        loop_mod.reap(paths, config)
     elif args.command == "clean":
         loop_mod.clean(paths)
     return 0

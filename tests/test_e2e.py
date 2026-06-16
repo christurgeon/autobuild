@@ -57,6 +57,46 @@ def test_e2e_runs_chain_in_dependency_order(git_repo, stub_bin, monkeypatch, git
     assert i3 < i2 < i1
 
 
+def test_e2e_pr_mode_dependency_visible_in_downstream_worktree(git_repo, stub_bin, monkeypatch):
+    """pr mode never lands a dep on base_branch, yet the dependent must still see the
+    dep's committed files in its worktree at spawn (the core fix)."""
+    stub_bin()
+    paths = init_project(git_repo, monkeypatch, integration="pr")
+    write_task(paths, "task-001")
+    write_task(paths, "task-002", depends_on=["task-001"])
+    config = load_config(paths.config_file)
+
+    # run + reap task-001; in pr mode its branch is left, NOT merged into main
+    rs1 = spawn_session(read_task(paths.tasks_dir / "task-001.md"), config, paths)
+    rs1.proc.wait()
+    loop_mod.reap_all(config, paths)
+    assert statuses(paths)["task-001"] == "done"
+
+    # spawning the dependent layers autobuild/task-001 onto its base at creation time
+    rs2 = spawn_session(read_task(paths.tasks_dir / "task-002.md"), config, paths)
+    assert (rs2.worktree / "task-001.txt").exists()  # visible before its own work runs
+    rs2.proc.wait()
+
+
+def test_e2e_branch_mode_transitive_chain_layers_all_ancestors(git_repo, stub_bin, monkeypatch, git):
+    """branch mode A<-B<-C through the real loop: C's branch must contain every
+    ancestor's file even though nothing is ever merged into main."""
+    stub_bin()
+    paths = init_project(git_repo, monkeypatch, integration="branch")
+    write_task(paths, "task-001")
+    write_task(paths, "task-002", depends_on=["task-001"])
+    write_task(paths, "task-003", depends_on=["task-002"])
+
+    loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=5)
+
+    assert statuses(paths) == {"task-001": "done", "task-002": "done", "task-003": "done"}
+    c = branch_name("task-003")
+    for f in ("task-001.txt", "task-002.txt", "task-003.txt"):
+        assert git(git_repo, "show", f"{c}:{f}", check=False).returncode == 0, f
+    # main is untouched in branch mode (the layering happens only on the task branches)
+    assert git(git_repo, "show", "main:task-001.txt", check=False).returncode != 0
+
+
 def test_e2e_blocked_dependency_gates_downstream(git_repo, stub_bin, monkeypatch):
     stub_bin(STUB_STATUS_task_002="BLOCKED")
     paths = init_project(git_repo, monkeypatch, integration="branch")
@@ -80,6 +120,35 @@ def test_e2e_stalled_session_becomes_blocked_and_loop_terminates(git_repo, stub_
     loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=5)
 
     assert statuses(paths)["task-001"] == "blocked"
+
+
+def test_e2e_run_end_names_stuck_task(git_repo, stub_bin, monkeypatch, capsys):
+    stub_bin(STUB_STATUS_task_002="BLOCKED")
+    paths = init_project(git_repo, monkeypatch, integration="branch")
+    write_task(paths, "task-001")
+    write_task(paths, "task-002", depends_on=["task-001"])
+    write_task(paths, "task-003", depends_on=["task-002"])
+
+    loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=5)
+
+    out = capsys.readouterr().out
+    # the run-end report names the stuck task and its reason, not the generic line
+    assert "task-003" in out
+    assert "blocked-dependency: task-002" in out
+    assert "backlog drained — COMPLETE" not in out
+
+
+def test_e2e_run_end_reports_complete_on_clean_drain(git_repo, stub_bin, monkeypatch, capsys):
+    stub_bin()  # every task COMPLETE
+    paths = init_project(git_repo, monkeypatch, integration="auto-merge")
+    write_task(paths, "task-001")
+    write_task(paths, "task-002", depends_on=["task-001"])
+
+    loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=5)
+
+    out = capsys.readouterr().out
+    assert "backlog drained — COMPLETE" in out
+    assert "cannot proceed" not in out
 
 
 def test_e2e_followup_filed_through_spawn_and_reap(git_repo, stub_bin, monkeypatch):

@@ -1,7 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 
 from autobuild.paths import Paths
-from autobuild.scheduler import claim_tasks, deps_satisfied, runnable_tasks
+from autobuild.scheduler import claim_tasks, deps_satisfied, runnable_tasks, stuck_tasks
 from autobuild.tasks import iter_tasks, read_task, task_index
 
 
@@ -71,6 +71,71 @@ def test_dependency_cycle_yields_no_runnable(tmp_path):
     tasks = iter_tasks(paths.tasks_dir)
     idx = task_index(paths.tasks_dir)
     assert runnable_tasks(tasks, idx) == []
+
+
+# ---- stuck task classification ---------------------------------------------
+
+def _stuck(paths):
+    tasks = iter_tasks(paths.tasks_dir)
+    return stuck_tasks(tasks, task_index(paths.tasks_dir))
+
+
+def test_stuck_missing_dependency(tmp_path):
+    paths = setup_project(tmp_path)
+    make_task(paths.tasks_dir, "task-001", depends_on=["task-999"])
+    assert _stuck(paths) == {"task-001": "missing-dependency: task-999"}
+
+
+def test_stuck_blocked_dependency_direct(tmp_path):
+    paths = setup_project(tmp_path)
+    make_task(paths.tasks_dir, "task-001", status="blocked")
+    make_task(paths.tasks_dir, "task-002", depends_on=["task-001"])
+    assert _stuck(paths) == {"task-002": "blocked-dependency: task-001"}
+
+
+def test_stuck_blocked_dependency_transitive(tmp_path):
+    paths = setup_project(tmp_path)
+    make_task(paths.tasks_dir, "task-001", status="blocked")
+    make_task(paths.tasks_dir, "task-002", depends_on=["task-001"])
+    make_task(paths.tasks_dir, "task-003", depends_on=["task-002"])
+    # task-003 reaches a blocked dep only transitively, through task-002
+    assert _stuck(paths) == {
+        "task-002": "blocked-dependency: task-001",
+        "task-003": "blocked-dependency: task-001",
+    }
+
+
+def test_stuck_dependency_cycle_reports_path(tmp_path):
+    paths = setup_project(tmp_path)
+    make_task(paths.tasks_dir, "task-001", depends_on=["task-002"])
+    make_task(paths.tasks_dir, "task-002", depends_on=["task-001"])
+    stuck = _stuck(paths)
+    # both participate; each reports the cycle starting from itself
+    assert stuck["task-001"] == "dependency-cycle: task-001 -> task-002 -> task-001"
+    assert stuck["task-002"] == "dependency-cycle: task-002 -> task-001 -> task-002"
+
+
+def test_stuck_self_cycle_terminates(tmp_path):
+    paths = setup_project(tmp_path)
+    make_task(paths.tasks_dir, "task-001", depends_on=["task-001"])
+    assert _stuck(paths) == {"task-001": "dependency-cycle: task-001 -> task-001"}
+
+
+def test_stuck_empty_when_all_eventually_runnable(tmp_path):
+    paths = setup_project(tmp_path)
+    make_task(paths.tasks_dir, "task-001", status="done")
+    make_task(paths.tasks_dir, "task-002", status="todo", depends_on=["task-001"])
+    make_task(paths.tasks_dir, "task-003", status="todo", depends_on=["task-002"])
+    # task-002 is runnable now; task-003 will be once task-002 finishes — neither stuck
+    assert _stuck(paths) == {}
+
+
+def test_stuck_excludes_terminal_tasks(tmp_path):
+    paths = setup_project(tmp_path)
+    # a blocked task is terminal — it is the *cause*, not itself reported as stuck
+    make_task(paths.tasks_dir, "task-001", status="blocked", depends_on=["task-999"])
+    make_task(paths.tasks_dir, "task-002", status="done", depends_on=["task-999"])
+    assert _stuck(paths) == {}
 
 
 # ---- atomic claiming --------------------------------------------------------
