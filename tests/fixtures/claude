@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Stub `claude` for autobuild tests — token-free.
+
+Invoked exactly as session.py spawns it: `claude -p <PROMPT> --model <M>`, with
+cwd == the session's git worktree. It recovers the session dir and task id from
+the prompt text (the contract lines build_prompt emits), makes a trivial commit
+in the worktree, and writes <sdir>/result.json.
+
+Env knobs a test sets before driving the loop:
+  STUB_STATUS            COMPLETE|BLOCKED|NEEDS_HUMAN   (default COMPLETE)
+  STUB_STATUS_<TID>      per-task override; '-' -> '_'  (STUB_STATUS_task_002)
+  STUB_FOLLOWUPS         JSON array for result.json "followups"  (default [])
+  STUB_STALL             "1" -> write NOTHING, exit 0 (simulates a dead session)
+  STUB_NO_COMMIT         "1" -> skip the git commit
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+
+def main():
+    argv = sys.argv[1:]
+    prompt = next((argv[i + 1] for i, a in enumerate(argv) if a == "-p" and i + 1 < len(argv)), None)
+    if prompt is None:
+        sys.stderr.write("stub-claude: no -p prompt\n")
+        return 1
+
+    m_sdir = re.search(r"session directory is:\s*(\S+)", prompt)
+    m_tid = re.search(r"Work ONLY on task\s+(\S+)", prompt)
+    sdir = m_sdir.group(1) if m_sdir else None
+    tid = (m_tid.group(1) if m_tid else "unknown").rstrip(".")
+
+    if os.environ.get("STUB_STALL") == "1":
+        return 0  # no result.json -> the reaper's stalled path must fire
+
+    tkey = "STUB_STATUS_" + tid.replace("-", "_")
+    status = os.environ.get(tkey) or os.environ.get("STUB_STATUS", "COMPLETE")
+    followups = json.loads(os.environ.get("STUB_FOLLOWUPS", "[]"))
+
+    commit_sha = ""
+    if status == "COMPLETE" and os.environ.get("STUB_NO_COMMIT") != "1":
+        cwd = os.getcwd()  # == worktree
+        with open(os.path.join(cwd, f"{tid}.txt"), "a") as fh:
+            fh.write(f"done by stub for {tid} pid={os.getpid()}\n")
+        subprocess.run(["git", "add", "-A"], cwd=cwd, check=True)
+        subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", f"stub: {tid}"],
+                       cwd=cwd, check=True)
+        commit_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cwd,
+                                    capture_output=True, text=True).stdout.strip()
+
+    if sdir:
+        os.makedirs(sdir, exist_ok=True)
+        with open(os.path.join(sdir, "result.json"), "w") as fh:
+            json.dump({"task": tid, "status": status,
+                       "summary": f"stub {status} for {tid}",
+                       "commit": commit_sha, "followups": followups}, fh)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
