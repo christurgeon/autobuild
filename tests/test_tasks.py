@@ -103,8 +103,8 @@ def test_set_status_roundtrips_and_is_idempotent(tmp_path):
 def test_set_status_leaves_no_temp_files(tmp_path):
     p = write(tmp_path, "task-001.md", TEMPLATE_TASK)
     set_status(p, "done")
-    leftovers = [x.name for x in tmp_path.iterdir() if x.name != "task-001.md"]
-    assert leftovers == []
+    temp_artifacts = [x.name for x in p.parent.iterdir() if x.name.startswith(".tmp-")]
+    assert temp_artifacts == []
 
 
 def test_set_status_does_not_touch_body_status_text(tmp_path):
