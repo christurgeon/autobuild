@@ -70,3 +70,18 @@ def test_run_refused_with_nonzero_exit_when_run_lock_held(tmp_path, monkeypatch,
         rc = cli.main(["run"])
     assert rc == 1
     assert "run.lock" in capsys.readouterr().err
+
+
+def test_invalid_config_exits_2_without_spawning(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    cli.main(["init"])
+    paths = Paths(tmp_path)
+    paths.config_file.write_text("integration: prr\nmax_parallel: 0\n", encoding="utf-8")
+
+    assert cli.main(["run"]) == 2
+
+    err = capsys.readouterr().err
+    assert str(paths.config_file) in err
+    assert "integration" in err and "max_parallel" in err
+    # the loop never ran: no session directories were created
+    assert not any(paths.sessions_dir.iterdir())

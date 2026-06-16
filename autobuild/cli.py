@@ -7,7 +7,7 @@ import importlib.resources as ir
 import sys
 
 from . import loop as loop_mod
-from .config import load_config
+from .config import ConfigError, load_config
 from .loop import log, ok
 from .paths import Paths
 
@@ -78,7 +78,13 @@ def main(argv: list[str] | None = None) -> int:
         return ab_init(paths)
 
     require_init(paths)
-    config = load_config(paths.config_file)
+    try:
+        config = load_config(paths.config_file)
+    except ConfigError as e:
+        _err(f"invalid configuration in {e.path}:")
+        for problem in e.problems:
+            print(f"  - {problem}", file=sys.stderr)
+        return 2
 
     if args.command == "run":
         try:

@@ -1,9 +1,11 @@
 # autobuild configuration. Safe to edit; the loop re-reads it each iteration.
+# Values are validated when autobuild starts: a bad value (e.g. integration: prr,
+# max_parallel: 0) fails fast with a listed error instead of surfacing mid-run.
 
-model: claude-opus-4-8        # passed to `claude --model`
-max_parallel: 3               # WIP limit / number of concurrent worktrees
-base_branch: main             # feature branches fork from and merge into this
-max_iterations: 50            # global safety stop for the outer loop
+model: claude-opus-4-8        # non-empty string, passed to `claude --model`
+max_parallel: 3               # integer >= 1: WIP limit / concurrent worktrees
+base_branch: main             # non-empty string: branches fork from and merge into this
+max_iterations: 50            # integer >= 1: global safety stop for the outer loop
 
 # What happens to a task's branch when its session reports COMPLETE:
 #   pr         -> open a pull request for human review (default, safest)
@@ -12,7 +14,8 @@ max_iterations: 50            # global safety stop for the outer loop
 integration: pr
 
 # Commands run after the implement phase. ALL must exit 0 to commit/finish.
-# Tailor these to your project. Empty list = no checks (not recommended).
+# Must be a YAML list of non-empty strings (a bare string is rejected). Tailor
+# these to your project. Empty list = no checks (not recommended).
 checks:
   - "echo 'replace me with real checks, e.g. npm test'"
 
