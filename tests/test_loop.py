@@ -135,6 +135,110 @@ def test_reap_pr_mode_without_gh_leaves_branch_and_marks_done(git_repo, monkeypa
     assert read_task(paths.tasks_dir / "task-001.md").status == "done"
 
 
+# ---- checks verification gate ----------------------------------------------
+
+def _branch_exists(git, repo, tid):
+    return git(repo, "show-ref", "--verify", "--quiet",
+               f"refs/heads/autobuild/{tid}", check=False).returncode == 0
+
+
+def _worktree_with_commit(paths, git, *, broken):
+    """A real worktree on autobuild/task-001 with one commit ahead of main. When
+    broken, the commit creates a BROKEN file so `test ! -f BROKEN` fails."""
+    wt = make_worktree(paths, "sess-task-001", "task-001", "main")
+    (wt / ("BROKEN" if broken else "feature.txt")).write_text("x")
+    git(wt, "add", "-A")
+    git(wt, "commit", "-q", "-m", "broken work" if broken else "feature work")
+    return wt
+
+
+def test_reap_failing_check_blocks_keeps_branch_and_logs(git_repo, git):
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    _worktree_with_commit(paths, git, broken=True)
+    sdir = make_session(paths, "task-001", "COMPLETE", commit="x")
+    cfg = Config(integration="auto-merge", checks=["test ! -f BROKEN"])
+
+    assert reap_session(sdir, cfg, paths) is True
+    # blocked, NOT merged, branch preserved, checks.log written
+    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+    assert "broken work" not in git(git_repo, "log", "--oneline", "main").stdout
+    assert _branch_exists(git, git_repo, "task-001")
+    assert (sdir / "checks.log").exists()
+    log = (sdir / "checks.log").read_text()
+    assert "test ! -f BROKEN" in log
+    reaped = json.loads((sdir / "reaped.json").read_text())
+    assert reaped["checks"] == "failed: test ! -f BROKEN"
+    assert reaped["integrated"] is False
+
+
+def test_reap_passing_check_integrates(git_repo, git):
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    _worktree_with_commit(paths, git, broken=False)
+    sdir = make_session(paths, "task-001", "COMPLETE", commit="x")
+    cfg = Config(integration="auto-merge", checks=["test ! -f BROKEN"])
+
+    assert reap_session(sdir, cfg, paths) is True
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"
+    assert "feature work" in git(git_repo, "log", "--oneline", "main").stdout
+    assert json.loads((sdir / "reaped.json").read_text())["checks"] == "passed"
+    assert not (sdir / "checks.log").exists()
+
+
+def test_verify_checks_false_bypasses_gate(git_repo, git):
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    _worktree_with_commit(paths, git, broken=True)  # would fail the check...
+    sdir = make_session(paths, "task-001", "COMPLETE", commit="x")
+    cfg = Config(integration="auto-merge", checks=["test ! -f BROKEN"], verify_checks=False)
+
+    assert reap_session(sdir, cfg, paths) is True
+    # ...but the gate is disabled, so today's trust-the-agent behavior: merged + done
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"
+    assert "broken work" in git(git_repo, "log", "--oneline", "main").stdout
+    assert json.loads((sdir / "reaped.json").read_text())["checks"] == "skipped"
+
+
+def test_empty_checks_skips_gate(git_repo, git):
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    _worktree_with_commit(paths, git, broken=False)
+    sdir = make_session(paths, "task-001", "COMPLETE", commit="x")
+    cfg = Config(integration="auto-merge", checks=[])  # no checks => no gate
+
+    assert reap_session(sdir, cfg, paths) is True
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"
+    assert json.loads((sdir / "reaped.json").read_text())["checks"] == "skipped"
+
+
+def test_failing_check_does_not_file_followups(git_repo, git):
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    _worktree_with_commit(paths, git, broken=True)
+    sdir = make_session(paths, "task-001", "COMPLETE", commit="x",
+                        followups=[{"title": "discovered work", "priority": 2}])
+    cfg = Config(integration="branch", checks=["test ! -f BROKEN"])
+
+    reap_session(sdir, cfg, paths)
+    # a tree that fails verification gets no follow-ups filed
+    assert [p.name for p in paths.tasks_dir.glob("*.md")] == ["task-001.md"]
+    assert json.loads((sdir / "reaped.json").read_text())["followups"] == []
+
+
+def test_failing_check_reap_is_idempotent(git_repo, git):
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    _worktree_with_commit(paths, git, broken=True)
+    sdir = make_session(paths, "task-001", "COMPLETE", commit="x")
+    cfg = Config(integration="auto-merge", checks=["test ! -f BROKEN"])
+
+    assert reap_session(sdir, cfg, paths) is True
+    # second pass is a no-op: the reaped.json guard prevents re-running checks
+    assert reap_session(sdir, cfg, paths) is False
+    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+
+
 # ---- follow-up filing -------------------------------------------------------
 
 def test_file_followups_creates_tasks_with_priority_and_notes(git_repo):

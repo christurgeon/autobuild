@@ -18,6 +18,8 @@ integration: pr
 checks:
   - "echo 'replace me with real checks, e.g. npm test'"
 
+verify_checks: true
+
 claude_cmd: claude            # override if your Claude CLI binary differs
 """
 
@@ -31,6 +33,7 @@ def test_defaults_when_file_missing(tmp_path):
     assert cfg.max_iterations == 50
     assert cfg.integration == "pr"
     assert cfg.checks == []
+    assert cfg.verify_checks is True
     assert cfg.claude_cmd == "claude"
 
 
@@ -48,7 +51,16 @@ def test_parses_template_config(tmp_path):
     assert cfg.max_parallel == 3 and isinstance(cfg.max_parallel, int)
     assert cfg.max_iterations == 50 and isinstance(cfg.max_iterations, int)
     assert cfg.integration == "pr"
+    assert cfg.verify_checks is True
     assert cfg.claude_cmd == "claude"
+
+
+def test_verify_checks_false_parses_to_bool(tmp_path):
+    p = tmp_path / "config.yml"
+    p.write_text("verify_checks: false\n")
+    cfg = load_config(p)
+    assert cfg.verify_checks is False
+    assert cfg.checks == []  # other defaults preserved
 
 
 def test_checks_block_list_keeps_inner_quotes(tmp_path):

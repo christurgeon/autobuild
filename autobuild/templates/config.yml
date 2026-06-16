@@ -19,4 +19,10 @@ integration: pr
 checks:
   - "echo 'replace me with real checks, e.g. npm test'"
 
+# Before integrating a COMPLETE session, the reaper re-runs `checks` against the
+# session's worktree itself — it does not take the agent's word that they passed.
+# Any failure marks the task `blocked` and keeps the branch (see <session>/checks.log).
+# Set to false to trust the agent and skip the harness-side re-run (not recommended).
+verify_checks: true
+
 claude_cmd: claude            # override if your Claude CLI binary differs

@@ -35,9 +35,11 @@ tasks/             <- one .md per task. Humans own it; agents append follow-ups.
 The loop, in one breath: **scheduler** picks the highest-priority unblocked tasks and
 atomically claims up to `max_parallel` of them → each claimed task gets a **fresh
 Claude session in its own git worktree** → the session plans, self-reviews, implements,
-runs checks, commits, and writes a `result.json` sentinel → the **reaper** marks the
-task `done` (opening a PR or auto-merging per config) or files a follow-up task on
-`BLOCKED` → repeat until the backlog is drained or a stop condition trips.
+runs checks, commits, and writes a `result.json` sentinel → the **reaper**
+re-runs the configured `checks` against that worktree itself (trust, but verify) and,
+only if they pass, marks the task `done` (opening a PR or auto-merging per config);
+a failed check or a `BLOCKED` sentinel leaves the branch and blocks the task → repeat
+until the backlog is drained or a stop condition trips.
 
 ## Quick start
 
@@ -84,6 +86,11 @@ checks:                       # run after implement; must all pass to commit/fin
   - npm run typecheck
   - npm run lint
   - npm test
+
+verify_checks: true           # reaper re-runs `checks` in the worktree before
+                              # integrating a COMPLETE session; any failure blocks
+                              # the task and keeps its branch (trust, but verify).
+                              # false -> trust the agent, skip the re-run.
 
 claude_cmd: claude            # override if your CLI binary is named differently
 ```

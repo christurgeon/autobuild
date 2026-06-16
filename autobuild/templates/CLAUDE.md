@@ -44,7 +44,9 @@ Always end by writing `<session-dir>/result.json`:
 }
 ```
 
-- **COMPLETE** — task done, checks pass, work committed.
+- **COMPLETE** — task done, checks pass, work committed. The reaper re-runs the
+  `checks` against your worktree before integrating, so do **not** write COMPLETE on a
+  tree where they fail — it will be overridden to `blocked` and left unmerged.
 - **BLOCKED** — you cannot proceed (missing dependency, ambiguous spec). Put the reason
   in `summary`. The reaper marks the task `blocked` and will not retry it blindly.
 - **NEEDS_HUMAN** — a decision only the human should make. Explain in `summary`.

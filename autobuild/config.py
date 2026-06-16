@@ -23,6 +23,7 @@ class Config:
     max_iterations: int = 50
     integration: str = "pr"  # pr | auto-merge | branch
     checks: list[str] = field(default_factory=list)
+    verify_checks: bool = True  # re-run checks in the reaper before integrating
     claude_cmd: str = "claude"
 
 
@@ -140,5 +141,6 @@ def load_config(path: Path) -> Config:
         max_iterations=max_iterations,
         integration=integration,
         checks=checks,
+        verify_checks=bool(data.get("verify_checks", defaults.verify_checks)),
         claude_cmd=claude_cmd,
     )

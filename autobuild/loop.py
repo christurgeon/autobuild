@@ -135,6 +135,44 @@ def integrate(tid: str, config: Config, paths: Paths) -> tuple[bool, str]:
     return False, f"unknown integration mode '{mode}'"
 
 
+# --- verification gate -------------------------------------------------------
+
+def _write_checks_log(sdir: Path, cmd: str, code: int, stdout: str, stderr: str) -> None:
+    """Persist why verification failed: the command, its exit code, and the tail of
+    its combined output (last 50 lines) so a human can inspect without re-running."""
+    tail = "\n".join(((stdout or "") + (stderr or "")).splitlines()[-50:])
+    (sdir / "checks.log").write_text(
+        f"command: {cmd}\nexit: {code}\n\n--- output (tail) ---\n{tail}\n",
+        encoding="utf-8",
+    )
+
+
+def verify_checks(config: Config, paths: Paths, sdir: Path, sid: str) -> tuple[bool, str]:
+    """Re-run config.checks against the session's worktree before integrating —
+    the harness's own verification of a COMPLETE, not the agent's self-report.
+
+    Returns (passed, outcome) where outcome is one of "skipped" (verification
+    disabled or no checks), "passed", or "failed: <cmd>". Stops at the first failing
+    command and writes <sdir>/checks.log. A missing worktree is treated as a failure:
+    we cannot verify the tree, so we refuse to trust it."""
+    if not config.verify_checks or not config.checks:
+        return True, "skipped"
+
+    worktree = paths.worktrees_dir / sid
+    if not worktree.is_dir():
+        _write_checks_log(sdir, "(pre-flight)", -1, "",
+                          f"worktree {worktree} is missing; cannot verify checks")
+        return False, "failed: worktree missing"
+
+    for cmd in config.checks:
+        r = subprocess.run(cmd, shell=True, cwd=str(worktree),
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            _write_checks_log(sdir, cmd, r.returncode, r.stdout, r.stderr)
+            return False, f"failed: {cmd}"
+    return True, "passed"
+
+
 # --- follow-ups --------------------------------------------------------------
 
 def file_followups(result: dict, sdir: Path, paths: Paths) -> list[str]:
@@ -180,19 +218,31 @@ def reap_session(sdir: Path, config: Config, paths: Paths) -> bool:
     task = task_index(paths.tasks_dir).get(tid)
     integrated = False
     followups: list[str] = []
+    checks_outcome = "n/a"
 
     if status == "COMPLETE":
-        success, detail = integrate(tid, config, paths)
-        if success:
-            if task:
-                set_status(task.path, "done")
-            integrated = True
-            ok(f"{sid}: {tid} COMPLETE — {detail}")
-        else:
+        # Trust, but verify: re-run the checks against the committed tree ourselves
+        # before integrating. A tree that fails verification is blocked, not merged.
+        verified, checks_outcome = verify_checks(config, paths, sdir, sid)
+        if not verified:
             if task:
                 set_status(task.path, "blocked")
-            warn(f"{sid}: {tid} integration failed — {detail}")
-        followups = file_followups(result, sdir, paths)
+            warn(f"{sid}: {tid} verification {checks_outcome} — not integrated; "
+                 f"branch {branch_name(tid)} kept (see {sdir / 'checks.log'})")
+            # No follow-ups: a tree that fails checks did not meet the contract, so
+            # its self-reported follow-ups are part of the same untrusted output.
+        else:
+            success, detail = integrate(tid, config, paths)
+            if success:
+                if task:
+                    set_status(task.path, "done")
+                integrated = True
+                ok(f"{sid}: {tid} COMPLETE — {detail}")
+            else:
+                if task:
+                    set_status(task.path, "blocked")
+                warn(f"{sid}: {tid} integration failed — {detail}")
+            followups = file_followups(result, sdir, paths)
     elif status == "BLOCKED":
         if task:
             set_status(task.path, "blocked")
@@ -207,7 +257,8 @@ def reap_session(sdir: Path, config: Config, paths: Paths) -> bool:
 
     remove_worktree(paths, sid)
     (sdir / "reaped.json").write_text(json.dumps(
-        {"reaped_at": _now(), "status": status, "integrated": integrated, "followups": followups},
+        {"reaped_at": _now(), "status": status, "integrated": integrated,
+         "checks": checks_outcome, "followups": followups},
         indent=2,
     ), encoding="utf-8")
     return True
