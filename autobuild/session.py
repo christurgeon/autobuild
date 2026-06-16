@@ -14,7 +14,7 @@ from subprocess import Popen
 from .config import Config
 from .paths import Paths
 from .tasks import Task, set_status, task_index
-from .worktree import DependencyMergeConflict, branch_name, make_worktree
+from .worktree import WorktreeError, branch_name, make_worktree
 
 
 @dataclass
@@ -81,7 +81,9 @@ def spawn_session(task: Task, config: Config, paths: Paths) -> RunningSession:
     try:
         wt = make_worktree(paths, sid, tid, config.base_branch,
                            _done_dependencies(task, paths))
-    except DependencyMergeConflict as exc:
+    except WorktreeError as exc:
+        # a dependency-merge conflict OR a non-conflict merge failure — surface the
+        # specific, actionable reason in the sentinel rather than a generic message.
         set_status(task.path, "blocked")
         write_sentinel(sdir, tid, "BLOCKED", str(exc))
         return RunningSession(sid, tid, sdir, None, task, None)

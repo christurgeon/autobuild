@@ -11,10 +11,21 @@ from pathlib import Path
 from .paths import Paths
 
 
-class DependencyMergeConflict(RuntimeError):
+class WorktreeError(RuntimeError):
+    """Base for failures while building a session's worktree."""
+
+
+class DependencyMergeConflict(WorktreeError):
     """A dependency's autobuild/<dep> branch could not be merged into the new
-    worktree (merge conflict). The merge is aborted before this is raised, so the
-    worktree is left with no half-merged state."""
+    worktree because of a *content conflict*. The merge is aborted before this is
+    raised, so the worktree is left with no half-merged state."""
+
+
+class DependencyMergeError(WorktreeError):
+    """A dependency merge failed for a reason *other* than a content conflict — most
+    commonly no committer identity configured (`git user.name` / `user.email`). Kept
+    distinct from DependencyMergeConflict so the failure isn't misreported as a
+    conflict and the message can be actionable. Aborted before raising."""
 
 
 def branch_name(tid: str) -> str:
@@ -71,12 +82,21 @@ def _merge_dependencies(root: Path, worktree: Path, tid: str,
         r = _git(worktree, "merge", "--no-ff", "-m",
                  f"autobuild: merge dependency {dep} into {tid}", dep_branch, check=False)
         if r.returncode != 0:
+            # Distinguish a real content conflict (unmerged paths in the index) from a
+            # merge that failed for another reason (e.g. unset committer identity).
+            # Capture the unmerged paths BEFORE aborting, which clears them.
+            unmerged = _git(worktree, "diff", "--name-only", "--diff-filter=U",
+                            check=False).stdout.strip()
             _git(worktree, "merge", "--abort", check=False)  # leave no half-merged tree
             detail = (r.stdout + r.stderr).strip().splitlines()
-            hint = detail[-1].strip() if detail else "merge conflict"
-            raise DependencyMergeConflict(
-                f"dependency {dep} ({dep_branch}) conflicts with {branch_name(tid)} — "
-                f"cannot build a base for {tid}: {hint}")
+            hint = detail[-1].strip() if detail else "git merge failed"
+            if unmerged:
+                raise DependencyMergeConflict(
+                    f"dependency {dep} ({dep_branch}) conflicts with {branch_name(tid)} — "
+                    f"cannot build a base for {tid}: {hint}")
+            raise DependencyMergeError(
+                f"merging dependency {dep} ({dep_branch}) into {branch_name(tid)} failed "
+                f"without a content conflict — check git user.name / user.email is set: {hint}")
 
 
 def remove_worktree(paths: Paths, sid: str) -> None:
