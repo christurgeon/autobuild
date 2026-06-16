@@ -20,9 +20,6 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["autobuild"]
 
-[tool.hatch.build.targets.wheel.force-include]
-"autobuild/templates" = "autobuild/templates"
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
