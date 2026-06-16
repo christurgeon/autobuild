@@ -42,8 +42,11 @@ task `done` (opening a PR or auto-merging per config) or files a follow-up task 
 ## Quick start
 
 ```bash
-# 1. Install (just put bin/ on your PATH)
-export PATH="$PWD/bin:$PATH"
+# 1. Install the CLI. autobuild is a uv-managed Python package; uv provisions a
+#    Python 3.11+ interpreter for you. From a checkout of this repo:
+uv tool install .              # installs the `autobuild` command globally
+# …or run it without installing, straight from the checkout:
+#   uv run autobuild <command>
 
 # 2. In your target project, lay down the templates
 cd ~/my-big-project
@@ -93,11 +96,37 @@ growing session** (context rot on long builds) and can't fan out to parallel
 worktrees. autobuild keeps each iteration a **fresh, disposable process** and runs
 several at once. Use `/loop` to prototype; use autobuild to actually drain a backlog.
 
-## Status
+## How it's built
 
-v0 / MVP scaffold. The loop, scheduler, worktree, and session modules are wired up
-with a real (if minimal) bash implementation. See `lib/` and the `TODO` markers for
-the parts that want hardening (YAML edge cases, PR creation, richer check reporting).
+A small, stdlib-first Python package (`autobuild/`). The only runtime dependency is
+**PyYAML**; everything else — process orchestration, JSON sentinels, the atomic claim
+lock — is the standard library.
+
+| Module | Responsibility |
+|---|---|
+| `cli.py` | argparse dispatch + the `autobuild` entry point |
+| `config.py` | load `.autobuild/config.yml` into a typed `Config` |
+| `tasks.py` | frontmatter read + surgical, atomic status writes + the follow-up id allocator |
+| `scheduler.py` | dependency gating, priority ordering, atomic claim under an `flock` |
+| `worktree.py` | a git worktree + branch per session |
+| `session.py` | spawn one fresh `claude -p` via `subprocess.Popen` |
+| `loop.py` | the outer loop, the reaper, crash-recovery reconcile, status, clean |
+
+Parallelism is real OS processes (`Popen` + `poll()`), supervised by a single `run`.
+There is no in-context state: kill `run` and re-run it — a startup *reconcile* pass
+recovers orphaned work from files + git, so every iteration stays disposable.
+
+## Development
+
+```bash
+uv sync                  # create the venv (Python 3.11+) and install deps
+uv run pytest            # run the full suite (unit + a token-free e2e loop)
+```
+
+The e2e tests drive the whole loop with a stub `claude` on `PATH` (see
+`tests/fixtures/claude`) — no tokens spent — and assert tasks run in dependency
+order. Design notes and the porting decisions live in
+`docs/superpowers/plans/2026-06-16-python-port.md`.
 
 ## License
 
