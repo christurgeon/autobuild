@@ -1,0 +1,9 @@
+# autobuild runtime state (this lives in *target* projects, but ignore here too)
+.autobuild/sessions/
+.autobuild/worktrees/
+.autobuild/.running
+.autobuild/backlog.lock
+
+# editor / OS noise
+.DS_Store
+*.swp

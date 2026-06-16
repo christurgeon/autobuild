@@ -1,0 +1,19 @@
+# autobuild configuration. Safe to edit; the loop re-reads it each iteration.
+
+model: claude-opus-4-8        # passed to `claude --model`
+max_parallel: 3               # WIP limit / number of concurrent worktrees
+base_branch: main             # feature branches fork from and merge into this
+max_iterations: 50            # global safety stop for the outer loop
+
+# What happens to a task's branch when its session reports COMPLETE:
+#   pr         -> open a pull request for human review (default, safest)
+#   auto-merge -> if checks pass, merge the branch into base_branch
+#   branch     -> leave the branch; a human merges later
+integration: pr
+
+# Commands run after the implement phase. ALL must exit 0 to commit/finish.
+# Tailor these to your project. Empty list = no checks (not recommended).
+checks:
+  - "echo 'replace me with real checks, e.g. npm test'"
+
+claude_cmd: claude            # override if your Claude CLI binary differs

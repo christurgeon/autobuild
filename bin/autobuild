@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# autobuild — a file-native harness that drains a backlog toward a GOAL using
+# fresh, isolated Claude Code sessions in parallel git worktrees.
+set -euo pipefail
+
+AUTOBUILD_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LIB="$AUTOBUILD_HOME/lib"
+
+# shellcheck source=/dev/null
+source "$LIB/common.sh"
+# shellcheck source=/dev/null
+source "$LIB/scheduler.sh"
+# shellcheck source=/dev/null
+source "$LIB/worktree.sh"
+# shellcheck source=/dev/null
+source "$LIB/session.sh"
+# shellcheck source=/dev/null
+source "$LIB/loop.sh"
+
+usage() {
+  cat <<'EOF'
+autobuild — drain a backlog toward a GOAL with parallel Claude sessions.
+
+USAGE:
+  autobuild <command>
+
+COMMANDS:
+  init      Copy GOAL.md, CLAUDE.md, tasks/, .autobuild/config.yml into this project
+  run       Run the outer loop: schedule -> spawn sessions in worktrees -> reap
+  status    Print every task's status and any in-flight sessions
+  reap      One-shot: collect finished sessions, update tasks, open PRs / merge
+  clean     Remove finished worktrees and stale session dirs
+  help      Show this help
+
+State lives under .autobuild/ in your project. It is disposable: delete it and it
+rebuilds from tasks/ and git history.
+EOF
+}
+
+cmd="${1:-help}"
+case "$cmd" in
+  init)   shift; ab_init "$@" ;;
+  run)    shift; ab_run "$@" ;;
+  status) shift; ab_status "$@" ;;
+  reap)   shift; ab_reap "$@" ;;
+  clean)  shift; ab_clean "$@" ;;
+  help|-h|--help) usage ;;
+  *) err "unknown command: $cmd"; usage; exit 2 ;;
+esac
