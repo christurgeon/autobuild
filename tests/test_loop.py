@@ -423,6 +423,73 @@ def test_reap_stalled_leaves_live_process_alone(git_repo):
     assert not (sdir / "result.json").exists()
 
 
+# ---- bug fix: malformed sentinel must not silently strand a task -----------
+
+def test_reap_salvages_sentinel_with_trailing_data(git_repo):
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    sdir = paths.sessions_dir / "sess-task-001"
+    sdir.mkdir(parents=True)
+    (sdir / "meta.json").write_text(json.dumps({"task": "task-001", "branch": "autobuild/task-001"}))
+    # a valid JSON object followed by stray trailing output an agent appended
+    (sdir / "result.json").write_text(
+        '{"task": "task-001", "status": "COMPLETE", "summary": "s", "commit": "", "followups": []}\n</content>\n',
+        encoding="utf-8",
+    )
+    assert reap_session(sdir, Config(integration="branch"), paths) is True
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"
+
+
+# ---- bug fix: a session exiting in the termination window is never dropped ---
+
+class _Exited:
+    def __init__(self, code=0):
+        self._code = code
+
+    def poll(self):
+        return self._code
+
+
+class _Alive:
+    def poll(self):
+        return None
+
+
+def test_harvest_reaps_exited_session_that_has_result(git_repo):
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    sdir = make_session(paths, "task-001", "COMPLETE")  # result.json on disk
+    rs = RunningSession("sess-task-001", "task-001", sdir,
+                        paths.worktrees_dir / "sess-task-001", None, _Exited())
+    survivors = loop_mod._harvest([rs], Config(integration="branch"), paths)
+    assert survivors == []
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"
+
+
+def test_harvest_blocks_exited_session_without_result(git_repo):
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    sid = "sess-task-001"
+    sdir = paths.sessions_dir / sid
+    sdir.mkdir(parents=True)
+    (sdir / "meta.json").write_text(json.dumps({"task": "task-001", "branch": "autobuild/task-001"}))
+    rs = RunningSession(sid, "task-001", sdir, paths.worktrees_dir / sid, None, _Exited(1))
+    survivors = loop_mod._harvest([rs], Config(integration="branch"), paths)
+    assert survivors == []
+    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+
+
+def test_harvest_keeps_live_session(git_repo):
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    sid = "sess-task-001"
+    sdir = paths.sessions_dir / sid
+    sdir.mkdir(parents=True)
+    rs = RunningSession(sid, "task-001", sdir, None, None, _Alive())
+    survivors = loop_mod._harvest([rs], Config(integration="branch"), paths)
+    assert survivors == [rs]
+
+
 # ---- status surfaces stuck tasks -------------------------------------------
 
 def test_collect_status_includes_stuck(git_repo):

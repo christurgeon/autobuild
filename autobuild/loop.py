@@ -58,9 +58,22 @@ def _now() -> str:
 
 def _read_json(path: Path) -> dict | None:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        text = path.read_text(encoding="utf-8")
+    except OSError:
         return None
+    try:
+        return json.loads(text)
+    except ValueError:
+        # Tolerate trailing data after a valid JSON object — agents sometimes append
+        # stray output (e.g. a closing tag) after the sentinel. Salvage the leading
+        # object so a task that genuinely finished is not silently stranded. A truly
+        # torn/partial write (no complete leading object) still returns None and is
+        # retried next pass.
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(text.lstrip())
+        except ValueError:
+            return None
+        return obj if isinstance(obj, dict) else None
 
 
 # --- run lock ----------------------------------------------------------------
@@ -348,6 +361,33 @@ def _active(running: list[RunningSession]) -> list[RunningSession]:
     return [rs for rs in running if not rs.has_result() and rs.alive()]
 
 
+def _harvest(running: list[RunningSession], config: Config, paths: Paths) -> list[RunningSession]:
+    """Reap finished sessions, BLOCK exited-without-result ones, and return the
+    still-running survivors.
+
+    A session is never dropped from tracking without first being reaped or stalled.
+    This closes the race where a session's process exits in the window between a
+    bare `reap_stalled` and a liveness filter: such a session used to be silently
+    dropped, leaving a valid result.json unreaped (task stuck in-progress forever).
+    """
+    survivors: list[RunningSession] = []
+    for rs in running:
+        if rs.has_result():
+            continue  # finished; the reap_all below acts on its sentinel
+        if rs.alive():
+            survivors.append(rs)
+            continue
+        # The process exited without a result. Re-check first: it may have written
+        # the sentinel just before exiting (the contract is write-then-exit), in
+        # which case reap_all handles it; only a genuinely empty exit is BLOCKED.
+        if not rs.has_result():
+            warn(f"{rs.sid} exited without a result; marking {rs.tid} BLOCKED")
+            write_sentinel(rs.sdir, rs.tid, "BLOCKED",
+                           "session process exited without writing result.json")
+    reap_all(config, paths)
+    return survivors
+
+
 def _wait_any(running: list[RunningSession], timeout: float) -> None:
     for rs in running:
         if rs.proc is not None:
@@ -380,9 +420,7 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float) -> None:
             warn(f"hit max_iterations ({config.max_iterations}); stopping")
             break
 
-        reap_stalled(running, paths)
-        reaped = reap_all(config, paths)
-        running = _active(running)
+        running = _harvest(running, config, paths)
 
         free = config.max_parallel - len(running)
         claimed = claim_tasks(free, paths) if free > 0 else []
@@ -390,7 +428,10 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float) -> None:
             rs = spawn_session(t, config, paths)
             log(f"spawn {rs.sid} -> {rs.tid}")
             running.append(rs)
-        running = _active(running)
+
+        # Final harvest before deciding the backlog is settled: a session that
+        # finishes in this window must be reaped here, not silently stranded.
+        running = _harvest(running, config, paths)
 
         if not running:
             tasks = iter_tasks(paths.tasks_dir)
@@ -411,8 +452,10 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float) -> None:
                          f"— see 'autobuild status'")
             break
 
-        if reaped == 0 and not claimed:
-            # nothing progressed this pass; block until a running session finishes
+        if not claimed:
+            # No new work to start this pass (at capacity, or nothing runnable yet).
+            # Block until a running session finishes rather than busy-spinning. If a
+            # reap had unblocked a task, claim_tasks above would have claimed it.
             _wait_any(running, timeout=sleep_seconds)
 
     status(paths, config)
