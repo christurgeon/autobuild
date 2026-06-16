@@ -3,6 +3,7 @@ import importlib.resources as ir
 import pytest
 
 from autobuild import cli
+from autobuild import loop as loop_mod
 from autobuild.paths import Paths
 
 
@@ -59,3 +60,13 @@ def test_unknown_command_exits_2(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as e:
         cli.main(["frobnicate"])
     assert e.value.code == 2
+
+
+def test_run_refused_with_nonzero_exit_when_run_lock_held(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    cli.main(["init"])
+    paths = Paths(tmp_path)
+    with loop_mod.run_lock(paths.run_lock):  # simulate another active run
+        rc = cli.main(["run"])
+    assert rc == 1
+    assert "run.lock" in capsys.readouterr().err

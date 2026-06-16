@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from autobuild import loop as loop_mod
 from autobuild.config import Config
 from autobuild.loop import (
@@ -166,18 +168,120 @@ def test_reconcile_resets_orphaned_claimed_to_todo(git_repo):
     assert read_task(paths.tasks_dir / "task-001.md").status == "todo"
 
 
-def test_reconcile_blocks_orphaned_in_progress(git_repo):
+def test_reconcile_blocks_orphaned_in_progress_when_sweeping(git_repo):
     paths = setup(git_repo)
     add_task(paths, "task-001", status="in-progress")
     sdir = paths.sessions_dir / "sess-task-001"
     sdir.mkdir(parents=True)
     (sdir / "meta.json").write_text(json.dumps({"task": "task-001", "branch": "autobuild/task-001"}))
-    reconcile(paths)
+    reconcile(paths, sweep_in_progress=True)
     # an orphaned in-progress session gets a BLOCKED sentinel...
     result = json.loads((sdir / "result.json").read_text())
     assert result["status"] == "BLOCKED"
     # ...which the reaper then turns into a blocked task
     reap_all(Config(integration="branch"), paths)
+    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+
+
+def test_reconcile_spares_in_progress_without_sweep(git_repo):
+    """The dangerous in-progress -> BLOCKED sweep is gated: a reconcile that does
+    not own the run lock (sweep_in_progress=False) must leave in-progress alone."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    sdir = paths.sessions_dir / "sess-task-001"
+    sdir.mkdir(parents=True)
+    (sdir / "meta.json").write_text(json.dumps({"task": "task-001", "branch": "autobuild/task-001"}))
+    reconcile(paths)  # default: do not sweep
+    assert not (sdir / "result.json").exists()
+    assert read_task(paths.tasks_dir / "task-001.md").status == "in-progress"
+
+
+# ---- run lock ---------------------------------------------------------------
+
+def test_second_run_refused_while_run_lock_held(git_repo):
+    """A second `run` while one is active exits non-zero (raises RunLockHeld)
+    without mutating task status, sessions, or worktrees."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="todo")
+    with loop_mod.run_lock(paths.run_lock):  # simulate the active run holding it
+        with pytest.raises(loop_mod.RunLockHeld):
+            loop_mod.run(paths, Config(integration="branch"), sleep_seconds=0)
+    assert read_task(paths.tasks_dir / "task-001.md").status == "todo"
+    assert list(paths.sessions_dir.iterdir()) == []
+
+
+def test_run_lock_released_after_run_returns(git_repo):
+    """The lock is advisory and released when the run ends, so a later run can
+    re-acquire it (flock auto-release is the crash semantic we rely on)."""
+    paths = setup(git_repo)
+    loop_mod.run(paths, Config(integration="branch"), sleep_seconds=0)  # no tasks -> returns
+    with loop_mod.run_lock(paths.run_lock):  # would raise if still held
+        pass
+
+
+def test_reap_alongside_active_run_spares_live_in_progress(git_repo):
+    """A reap that cannot take the run lock (a run is active) must NOT block a live
+    in-progress session nor remove its worktree — it can't see the run's children."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    wt = make_worktree(paths, "sess-live", "task-001", "main")
+    sdir = paths.sessions_dir / "sess-live"
+    sdir.mkdir(parents=True)
+    (sdir / "meta.json").write_text(json.dumps({"task": "task-001", "branch": "autobuild/task-001"}))
+    with loop_mod.run_lock(paths.run_lock):  # the owning run holds the lock
+        loop_mod.reap(paths, Config(integration="branch"))
+    assert read_task(paths.tasks_dir / "task-001.md").status == "in-progress"
+    assert not (sdir / "result.json").exists()
+    assert wt.exists()
+
+
+def test_reap_alongside_run_leaves_live_session_process_and_worktree(git_repo):
+    """End-to-end shape: a genuinely live session (a long-sleeping process standing
+    in for `claude`) the owning run supervises, plus the held run lock. A concurrent
+    reap must leave the task in-progress, write no sentinel, keep the worktree, and
+    never touch the live process — the data-loss the run lock prevents."""
+    import subprocess as sp
+
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    wt = make_worktree(paths, "sess-live", "task-001", "main")
+    sdir = paths.sessions_dir / "sess-live"
+    sdir.mkdir(parents=True)
+    (sdir / "meta.json").write_text(json.dumps({"task": "task-001", "branch": "autobuild/task-001"}))
+    proc = sp.Popen(["sleep", "30"])
+    try:
+        with loop_mod.run_lock(paths.run_lock):  # the owning run holds the lock
+            loop_mod.reap(paths, Config(integration="branch"))
+        assert read_task(paths.tasks_dir / "task-001.md").status == "in-progress"
+        assert not (sdir / "result.json").exists()
+        assert wt.exists()
+        assert proc.poll() is None  # reap never reached for the live process
+    finally:
+        proc.terminate()
+        proc.wait()
+
+
+def test_fresh_run_reconciles_orphaned_in_progress_after_crash(git_repo):
+    """After a run is killed (lock auto-released), a fresh run takes the lock and
+    reconciles orphaned in-progress sessions to blocked — crash recovery works."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    sdir = paths.sessions_dir / "sess-orphan"
+    sdir.mkdir(parents=True)
+    (sdir / "meta.json").write_text(json.dumps({"task": "task-001", "branch": "autobuild/task-001"}))
+    loop_mod.run(paths, Config(integration="branch"), sleep_seconds=0)
+    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+
+
+def test_reap_without_active_run_recovers_orphaned_in_progress(git_repo):
+    """When no run is active, reap can take the lock and perform the same
+    crash-recovery sweep a fresh run would."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    sdir = paths.sessions_dir / "sess-orphan"
+    sdir.mkdir(parents=True)
+    (sdir / "meta.json").write_text(json.dumps({"task": "task-001", "branch": "autobuild/task-001"}))
+    loop_mod.reap(paths, Config(integration="branch"))
     assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
 
 

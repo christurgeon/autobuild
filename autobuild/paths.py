@@ -36,6 +36,10 @@ class Paths:
         return self.ab_dir / "backlog.lock"
 
     @property
+    def run_lock(self) -> Path:
+        return self.ab_dir / "run.lock"
+
+    @property
     def config_file(self) -> Path:
         return self.ab_dir / "config.yml"
 

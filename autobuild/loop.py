@@ -11,6 +11,8 @@ Ports loop.sh, with the audit's corruption/hang fixes:
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import subprocess
 import time
@@ -59,6 +61,37 @@ def _read_json(path: Path) -> dict | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+
+
+# --- run lock ----------------------------------------------------------------
+
+class RunLockHeld(RuntimeError):
+    """Raised when the advisory run lock is already held — i.e. another
+    `autobuild run` owns this project. str() is the lock file path."""
+
+
+@contextlib.contextmanager
+def run_lock(lock_file: Path):
+    """Hold the project's exclusive run lock for the duration of the with-block.
+
+    A single `run` owns the lock for its whole lifetime; this is what lets
+    `reconcile()` safely BLOCK orphaned in-progress sessions (the lock proves no
+    other process is driving them). Acquisition is non-blocking: if another holder
+    has it, raise RunLockHeld immediately rather than waiting. The lock is an
+    fcntl.flock, so the kernel releases it automatically if the holder dies — the
+    exact crash semantic we want, with no stale-PID games."""
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    f = open(lock_file, "w")
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        f.close()
+        raise RunLockHeld(str(lock_file)) from e
+    try:
+        yield
+    finally:
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        f.close()
 
 
 # --- integration -------------------------------------------------------------
@@ -204,32 +237,58 @@ def reap_stalled(running: list[RunningSession], paths: Paths) -> None:
 
 # --- reconcile (startup crash recovery) -------------------------------------
 
-def reconcile(paths: Paths) -> None:
+def reconcile(paths: Paths, *, sweep_in_progress: bool = False) -> None:
     """Restore resume-ability after a `run` crash. Orphaned `claimed` tasks (claim
-    succeeded, spawn never finished) go back to `todo`; orphaned `in-progress`
-    sessions (no live process, no result) get a BLOCKED sentinel for the reaper."""
+    succeeded, spawn never finished) go back to `todo`.
+
+    The orphaned `in-progress` -> BLOCKED sweep is gated on `sweep_in_progress`,
+    which the caller sets only when it holds the run lock. Without the lock we
+    cannot tell a genuinely orphaned session from one a *concurrent* live run is
+    actively driving (its child process is invisible to us), so a reap that runs
+    alongside a run must NOT sweep — doing so would BLOCK live sessions and remove
+    their worktrees out from under the run. A fresh `run` (or a `reap` that can
+    take the lock) holds it, proving no other process owns these sessions, and
+    sweeps as before."""
     for t in iter_tasks(paths.tasks_dir):
         if t.status == "claimed":
             set_status(t.path, "todo")
 
-    index = task_index(paths.tasks_dir)
-    if paths.sessions_dir.is_dir():
-        for sdir in sorted(paths.sessions_dir.iterdir()):
-            if not sdir.is_dir():
-                continue
-            if (sdir / "result.json").exists() or (sdir / "reaped.json").exists():
-                continue
-            meta = _read_json(sdir / "meta.json")
-            if not meta:
-                continue
-            tid = str(meta.get("task", ""))
-            task = index.get(tid)
-            if task and task.status == "in-progress":
-                warn(f"orphaned in-progress session {sdir.name}; marking {tid} BLOCKED")
-                write_sentinel(sdir, tid, "BLOCKED",
-                               "orphaned: run restarted while session was in-progress; "
-                               "no result.json was written")
+    if sweep_in_progress:
+        index = task_index(paths.tasks_dir)
+        if paths.sessions_dir.is_dir():
+            for sdir in sorted(paths.sessions_dir.iterdir()):
+                if not sdir.is_dir():
+                    continue
+                if (sdir / "result.json").exists() or (sdir / "reaped.json").exists():
+                    continue
+                meta = _read_json(sdir / "meta.json")
+                if not meta:
+                    continue
+                tid = str(meta.get("task", ""))
+                task = index.get(tid)
+                if task and task.status == "in-progress":
+                    warn(f"orphaned in-progress session {sdir.name}; marking {tid} BLOCKED")
+                    write_sentinel(sdir, tid, "BLOCKED",
+                                   "orphaned: run restarted while session was in-progress; "
+                                   "no result.json was written")
     prune_worktrees(paths)
+
+
+def reap(paths: Paths, config: Config) -> None:
+    """One-shot reap. If the run lock is free (no active run) we take it and do the
+    full crash-recovery reconcile, exactly as a fresh `run` would. If a run holds
+    it, we skip the in-progress sweep entirely and only collect finished sentinels
+    — idempotent result.json handling that never touches the live run's sessions."""
+    paths.ensure_runtime_dirs()
+    try:
+        with run_lock(paths.run_lock):
+            reconcile(paths, sweep_in_progress=True)
+            reap_all(config, paths)
+    except RunLockHeld:
+        warn("an 'autobuild run' is active (holds run.lock); collecting finished "
+             "sessions only, leaving its in-progress sessions alone")
+        reap_all(config, paths)
+    status(paths, config)
 
 
 # --- outer loop --------------------------------------------------------------
@@ -249,9 +308,18 @@ def _wait_any(running: list[RunningSession], timeout: float) -> None:
 
 
 def run(paths: Paths, config: Config, *, sleep_seconds: float = 2.0) -> None:
+    """Drive the outer loop until the backlog drains. Holds the run lock for the
+    whole lifetime: a second `run` is refused (RunLockHeld) and a `reap` running
+    alongside this one cannot reconcile the sessions this run owns. Because we hold
+    the lock, the startup reconcile is free to BLOCK genuinely orphaned sessions."""
+    with run_lock(paths.run_lock):
+        _run_locked(paths, config, sleep_seconds=sleep_seconds)
+
+
+def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float) -> None:
     paths.ensure_runtime_dirs()
     log(f"starting loop (max_parallel={config.max_parallel}, max_iterations={config.max_iterations})")
-    reconcile(paths)
+    reconcile(paths, sweep_in_progress=True)
 
     running: list[RunningSession] = []
     iteration = 0
