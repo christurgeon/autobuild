@@ -111,3 +111,25 @@ def test_spawn_real_stub_produces_result_and_commit(git_repo, stub_bin):
     assert result["status"] == "COMPLETE"
     assert result["task"] == "task-001"
     assert result["commit"]  # the stub committed in the worktree
+
+
+def test_spawn_conflicting_dependency_blocks_with_dep_named(git_repo, diverging_dep):
+    """A dependency that cannot be merged into the new worktree base blocks the task,
+    and the BLOCKED sentinel names the conflicting dependency."""
+    paths = make_project(git_repo)
+    diverging_dep(git_repo, "task-001")  # main and autobuild/task-001 conflict on shared.txt
+
+    # task-001 is done; task-002 depends on it
+    (paths.tasks_dir / "task-001.md").write_text(
+        "---\nid: task-001\ntitle: t\nstatus: done\npriority: 1\ndepends_on: []\n---\n\nx\n",
+        encoding="utf-8")
+    dep_task = write_task(paths, "task-002")
+    dep_task.depends_on = ["task-001"]
+
+    rs = spawn_session(dep_task, Config(), paths)
+
+    assert rs.proc is None
+    result = json.loads((rs.sdir / "result.json").read_text())
+    assert result["status"] == "BLOCKED"
+    assert "task-001" in result["summary"]
+    assert read_task(dep_task.path).status == "blocked"

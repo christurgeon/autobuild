@@ -108,7 +108,7 @@ lock — is the standard library.
 | `config.py` | load `.autobuild/config.yml` into a typed `Config` |
 | `tasks.py` | frontmatter read + surgical, atomic status writes + the follow-up id allocator |
 | `scheduler.py` | dependency gating, priority ordering, atomic claim under an `flock` |
-| `worktree.py` | a git worktree + branch per session |
+| `worktree.py` | a git worktree + branch per session, with each task's `done` dependency branches layered onto its base |
 | `session.py` | spawn one fresh `claude -p` via `subprocess.Popen` |
 | `loop.py` | the outer loop, the reaper, crash-recovery reconcile, status, clean |
 
