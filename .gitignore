@@ -16,3 +16,6 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+
+# superpowers plans/specs — local working artifacts, not tracked
+docs/superpowers/
