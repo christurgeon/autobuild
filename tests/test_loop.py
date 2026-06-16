@@ -5,11 +5,13 @@ import pytest
 from autobuild import loop as loop_mod
 from autobuild.config import Config
 from autobuild.loop import (
+    collect_status,
     file_followups,
     reap_all,
     reap_session,
     reap_stalled,
     reconcile,
+    status,
 )
 from autobuild.paths import Paths
 from autobuild.session import RunningSession
@@ -419,3 +421,35 @@ def test_reap_stalled_leaves_live_process_alone(git_repo):
     rs = RunningSession(sid, "task-001", sdir, None, None, LiveProc())
     reap_stalled([rs], paths)
     assert not (sdir / "result.json").exists()
+
+
+# ---- status surfaces stuck tasks -------------------------------------------
+
+def test_collect_status_includes_stuck(git_repo):
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="todo", depends_on=["task-999"])
+    report = collect_status(paths)
+    assert report["stuck"] == [{"task": "task-001", "reason": "missing-dependency: task-999"}]
+
+
+def test_collect_status_stuck_empty_when_none(git_repo):
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="todo")
+    assert collect_status(paths)["stuck"] == []
+
+
+def test_status_prints_stuck_section_when_present(git_repo, capsys):
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="todo", depends_on=["task-999"])
+    status(paths, Config(integration="branch"))
+    out = capsys.readouterr().out
+    assert "STUCK" in out
+    assert "task-001" in out
+    assert "missing-dependency: task-999" in out
+
+
+def test_status_omits_stuck_section_when_none(git_repo, capsys):
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="todo")
+    status(paths, Config(integration="branch"))
+    assert "STUCK" not in capsys.readouterr().out

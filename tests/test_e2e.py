@@ -122,6 +122,35 @@ def test_e2e_stalled_session_becomes_blocked_and_loop_terminates(git_repo, stub_
     assert statuses(paths)["task-001"] == "blocked"
 
 
+def test_e2e_run_end_names_stuck_task(git_repo, stub_bin, monkeypatch, capsys):
+    stub_bin(STUB_STATUS_task_002="BLOCKED")
+    paths = init_project(git_repo, monkeypatch, integration="branch")
+    write_task(paths, "task-001")
+    write_task(paths, "task-002", depends_on=["task-001"])
+    write_task(paths, "task-003", depends_on=["task-002"])
+
+    loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=5)
+
+    out = capsys.readouterr().out
+    # the run-end report names the stuck task and its reason, not the generic line
+    assert "task-003" in out
+    assert "blocked-dependency: task-002" in out
+    assert "backlog drained — COMPLETE" not in out
+
+
+def test_e2e_run_end_reports_complete_on_clean_drain(git_repo, stub_bin, monkeypatch, capsys):
+    stub_bin()  # every task COMPLETE
+    paths = init_project(git_repo, monkeypatch, integration="auto-merge")
+    write_task(paths, "task-001")
+    write_task(paths, "task-002", depends_on=["task-001"])
+
+    loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=5)
+
+    out = capsys.readouterr().out
+    assert "backlog drained — COMPLETE" in out
+    assert "cannot proceed" not in out
+
+
 def test_e2e_followup_filed_through_spawn_and_reap(git_repo, stub_bin, monkeypatch):
     stub_bin(STUB_FOLLOWUPS=json.dumps([{"title": "discovered work", "priority": 2}]))
     paths = init_project(git_repo, monkeypatch, integration="branch")

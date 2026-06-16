@@ -22,7 +22,7 @@ from shutil import which
 
 from .config import Config
 from .paths import Paths
-from .scheduler import backlog_lock, claim_tasks, runnable_tasks
+from .scheduler import backlog_lock, claim_tasks, runnable_tasks, stuck_tasks
 from .session import RunningSession, spawn_session, write_sentinel
 from .tasks import (
     create_task_file,
@@ -393,13 +393,22 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float) -> None:
         running = _active(running)
 
         if not running:
-            pending = [t for t in iter_tasks(paths.tasks_dir) if not is_terminal(t.status)]
+            tasks = iter_tasks(paths.tasks_dir)
+            pending = [t for t in tasks if not is_terminal(t.status)]
             if not pending:
                 ok("backlog drained — COMPLETE")
             else:
-                blocked = sum(1 for t in pending if t.status == "blocked")
-                warn(f"backlog settled with {len(pending)} unfinished task(s) "
-                     f"({blocked} blocked) — see 'autobuild status'")
+                stuck = stuck_tasks(tasks, {t.id: t for t in tasks})
+                if stuck:
+                    warn(f"backlog settled: {len(stuck)} task(s) cannot proceed:")
+                    for tid in sorted(stuck):
+                        warn(f"  {tid}: {stuck[tid]}")
+                    other = len(pending) - len(stuck)
+                    if other:
+                        warn(f"  ...plus {other} other unfinished task(s) — see 'autobuild status'")
+                else:
+                    warn(f"backlog settled with {len(pending)} unfinished task(s) "
+                         f"— see 'autobuild status'")
             break
 
         if reaped == 0 and not claimed:
@@ -416,6 +425,9 @@ def collect_status(paths: Paths) -> dict:
     counts: dict[str, int] = {}
     for t in tasks:
         counts[t.status] = counts.get(t.status, 0) + 1
+
+    stuck = stuck_tasks(tasks, {t.id: t for t in tasks})
+    stuck_list = [{"task": tid, "reason": stuck[tid]} for tid in sorted(stuck)]
 
     sessions = []
     if paths.sessions_dir.is_dir():
@@ -434,7 +446,7 @@ def collect_status(paths: Paths) -> dict:
     branches = [ln.strip("* ").strip() for ln in br.stdout.splitlines() if ln.strip()]
 
     return {"counts": counts, "tasks": tasks, "sessions": sessions,
-            "worktrees": worktrees, "branches": branches}
+            "worktrees": worktrees, "branches": branches, "stuck": stuck_list}
 
 
 def status(paths: Paths, config: Config) -> dict:
@@ -448,6 +460,11 @@ def status(paths: Paths, config: Config) -> dict:
     print(f"\n{_c('1;37')}TASKS{_c('0')}")
     for t in report["tasks"]:
         print(f"  {t.id:<12} p{t.priority:<3} {t.status:<12} {t.title}")
+
+    if report["stuck"]:
+        print(f"\n{_c('1;31')}STUCK{_c('0')}")
+        for s in report["stuck"]:
+            print(f"  {s['task']:<12} {s['reason']}")
 
     print(f"\n{_c('1;37')}SESSIONS{_c('0')}")
     for s in report["sessions"]:
