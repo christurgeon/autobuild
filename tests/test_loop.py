@@ -817,3 +817,12 @@ def test_one_dead_group_does_not_abort_harvest_of_others(git_repo):
     assert survivors == []
     assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
     assert read_task(paths.tasks_dir / "task-002.md").status == "done"
+
+
+def test_run_settles_with_parked_timeout_task(git_repo):
+    """A parked `timeout` task (non-terminal, not todo) must let the loop settle, not
+    spin to max_iterations."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="timeout")
+    loop_mod.run(paths, Config(integration="branch"), sleep_seconds=0)  # must return
+    assert read_task(paths.tasks_dir / "task-001.md").status == "timeout"
