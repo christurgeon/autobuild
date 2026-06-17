@@ -62,23 +62,33 @@ Module responsibilities:
 - **`autobuild/cli.py`** — `argparse` dispatch + the `autobuild` entry point. `ab_init` copies
   the packaged templates into the project; `require_init` guards the other commands.
 - **`autobuild/config.py`** — load `.autobuild/config.yml` into a typed, frozen `Config`
-  (all keys optional; defaults match the template).
+  (all keys optional; defaults match the template). Values are **validated at load**: every
+  problem is aggregated into one `ConfigError` so a bad config (`integration: prr`,
+  `max_parallel: 0`) fails fast with exit 2 *before* any session spawns.
 - **`autobuild/tasks.py`** — the `Task` model, frontmatter I/O, `set_status`, and the follow-up
   id allocator (`next_task_id` / `create_task_file`).
 - **`autobuild/scheduler.py`** — `runnable_tasks` (status `todo` + every `depends_on` id is
   `done`, sorted by `(priority, id)`) and `claim_tasks(n)`, which atomically flips up to N tasks
   `todo→claimed` under an exclusive `fcntl.flock` on `.autobuild/backlog.lock` so parallel runs
   never double-claim. The same `backlog_lock` is reused when allocating follow-up ids.
+  `stuck_tasks` classifies a non-terminal task that can never run (missing / blocked / cyclic
+  dependency) so the loop and `status` can name *why* instead of stalling silently.
 - **`autobuild/worktree.py`** — `make_worktree` / `remove_worktree` / `prune_worktrees`: one
   isolated checkout + branch (`autobuild/<task-id>`) per session, forked from `base_branch`
-  (the branch is reused on a retry).
+  (the branch is reused on a retry), then each `done` dependency's `autobuild/<dep>` branch is
+  **merged onto that base** so a dependent sees its dependencies' code in every integration mode,
+  not just `auto-merge`. A dependency that won't merge raises `DependencyMergeConflict` (content
+  conflict) or `DependencyMergeError` (other failure, e.g. no git identity), aborting first so no
+  half-merged tree is left.
 - **`autobuild/session.py`** — `spawn_session`: builds the session dir + worktree + `meta.json`,
   sets the task `in-progress`, and launches a **fresh `claude -p`** via `subprocess.Popen`. It
   returns an in-memory `RunningSession` handle the loop supervises with `proc.poll()` — this
   replaces the bash `.running` PID file.
-- **`autobuild/loop.py`** — the outer Ralph-style loop (`run`), the reaper
-  (`reap_all` / `reap_session` / `reap_stalled`), `reconcile` (startup crash recovery),
-  `integrate`, `file_followups`, `status`, and `clean`.
+- **`autobuild/loop.py`** — the outer Ralph-style loop (`run`, holding a single-supervisor
+  `fcntl.flock` on `.autobuild/run.lock`), the reaper (`reap_all` / `reap_session`), session
+  harvesting (`_harvest` / `_classify_sentinel`), `reconcile` (startup crash recovery),
+  `verify_checks`, `integrate`, `file_followups`, `status`, and `clean`. The CLI `reap` maps to
+  `reap` here (a lock-aware wrapper), not `reap_all` directly.
 - **`autobuild/paths.py`** — the frozen `Paths` dataclass.
 
 ### The session lifecycle / sentinel protocol (the core data flow)
@@ -92,16 +102,20 @@ This is the part that requires reading multiple files to understand:
    the loop tracks in memory.
 3. The session follows `autobuild/templates/CLAUDE.md`'s contract and ends by writing
    `.autobuild/sessions/<sid>/result.json` with `status: COMPLETE | BLOCKED | NEEDS_HUMAN`.
-4. `reap_session` reads that sentinel and acts. For `COMPLETE` it **integrates first**
-   (`integrate` → `pr` via `gh` / `auto-merge` / `branch`) and only then `set_status`es the task
-   `done` — so a failed auto-merge leaves the task `blocked`, not falsely `done`. It files any
-   `followups[]` as new `tasks/*.md` (ids allocated under the backlog lock), removes the
-   worktree, and drops a `reaped.json` marker. That marker makes the reaper **idempotent**: a
-   second pass over the same session is a no-op.
-5. `reap_stalled` is one safety net — a `RunningSession` whose process exited without writing
-   `result.json` gets a synthetic `BLOCKED` sentinel. `reconcile` is the other: at startup it
-   returns orphaned `claimed` tasks to `todo` and gives orphaned `in-progress` sessions a
-   `BLOCKED` sentinel, so a killed `run` resumes cleanly from files alone (no PID file needed).
+4. `reap_session` reads that sentinel and acts. For `COMPLETE` it **verifies first**: unless
+   `verify_checks: false`, it re-runs `config.checks` against the session's worktree and, if any
+   fail, blocks the task and keeps the branch instead of integrating (trust, but verify). If they
+   pass it **integrates** (`integrate` → `pr` via `gh` / `auto-merge` / `branch`) and only then
+   `set_status`es the task `done` — so a failed auto-merge leaves the task `blocked`, not falsely
+   `done`. It files any `followups[]` as new `tasks/*.md` (ids allocated under the backlog lock),
+   removes the worktree, and drops a `reaped.json` marker. That marker makes the reaper
+   **idempotent**: a second pass over the same session is a no-op.
+5. Two safety nets catch sessions that don't end cleanly. In-loop, `_harvest` never drops a
+   session without reaping it: a process that exits with no usable sentinel — absent, or present
+   but unparseable (`_classify_sentinel`) — is given a synthetic `BLOCKED`. At startup `reconcile`
+   (only while it holds the run lock) returns orphaned `claimed` tasks to `todo` and `BLOCKED`s
+   orphaned `in-progress` sessions, so a killed `run` resumes cleanly from files alone (no PID
+   file needed).
 
 The loop terminates when nothing is running **and** nothing is runnable (backlog drained, or
 settled behind blocked/unsatisfiable deps), or when `max_iterations` trips. When a pass makes no
@@ -127,14 +141,20 @@ which is what keeps the loop running. The full vocabulary lives in the template 
 - **The backlog lock is `fcntl.flock` on `.autobuild/backlog.lock`** (auto-released if the holder
   dies — no stale lockdir to strand). Any mutation that must be serialized across parallel runs
   (claiming tasks, allocating follow-up ids) goes through `backlog_lock`.
+- **`run` is single-supervisor.** It holds a separate `fcntl.flock` on `.autobuild/run.lock` for
+  its whole lifetime; a second `autobuild run` is refused (`RunLockHeld`, non-zero exit) rather
+  than fighting over the same sessions. `reap` is lock-aware — it only performs the dangerous
+  in-progress→`BLOCKED` reconcile sweep when it can take the lock (i.e. no live `run`).
 - **Status writes are surgical and atomic.** `set_status` rewrites only the `status:` line via
   regex + `os.replace`; never round-trip a human task file through `yaml.dump` (it would strip
   comments and reorder keys). Follow-up task files are generated, so those *are* serialized with
   `yaml.safe_dump`.
-- Naming: CLI subcommands map to `run` / `status` / `reap_all` / `clean` in `loop.py` (plus
+- Naming: CLI subcommands map to `run` / `status` / `reap` / `clean` in `loop.py` (plus
   `ab_init` in `cli.py`); module-internal helpers are prefixed `_`.
 - Minimal dependencies by design: **PyYAML** is the only runtime dep; everything else (process
   orchestration via `subprocess`, JSON sentinels, the claim lock) is the standard library. Match
   that style unless you're deliberately adding a dependency.
-- Project status is v0/MVP. `# TODO` and audit-note markers in the source flag the parts still
-  wanting hardening (PR creation, richer check reporting, integration edge cases).
+- The core has been hardened by dogfooding autobuild on its own backlog — the run-lock,
+  dependency-aware worktree bases, reaper checks-verification, config validation, stuck-dependency
+  surfacing, and the sentinel/termination races those exposed are all in place with tests. Match
+  that bar: a real defect plus a regression test beats new scope.

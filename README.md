@@ -118,10 +118,14 @@ lock — is the standard library.
 | `worktree.py` | a git worktree + branch per session, with each task's `done` dependency branches layered onto its base |
 | `session.py` | spawn one fresh `claude -p` via `subprocess.Popen` |
 | `loop.py` | the outer loop, the reaper, crash-recovery reconcile, status, clean |
+| `paths.py` | the one place every `.autobuild/` location is defined |
 
-Parallelism is real OS processes (`Popen` + `poll()`), supervised by a single `run`.
-There is no in-context state: kill `run` and re-run it — a startup *reconcile* pass
-recovers orphaned work from files + git, so every iteration stays disposable.
+Parallelism is real OS processes (`Popen` + `poll()`), supervised by a single `run`
+that holds a lock (`.autobuild/run.lock`), so a second `run` is refused rather than
+colliding. There is no in-context state: kill `run` and re-run it — a startup
+*reconcile* pass recovers orphaned work from files + git, so every iteration stays
+disposable. `config.yml` is validated at load (a bad value fails fast with exit 2),
+and `autobuild status` flags any tasks stuck behind unsatisfiable dependencies.
 
 ## Development
 
