@@ -187,3 +187,17 @@ def test_dependency_merge_errors_are_distinct_types():
     # and vice versa — callers distinguish a content conflict from other failures.
     assert not issubclass(DependencyMergeError, DependencyMergeConflict)
     assert not issubclass(DependencyMergeConflict, DependencyMergeError)
+
+
+# ---- task-105: cleaning a killed (dirty/locked) worktree -------------------
+
+def test_remove_locked_dirty_worktree(git_repo):
+    paths = Paths(git_repo)
+    paths.worktrees_dir.mkdir(parents=True, exist_ok=True)
+    wt = make_worktree(paths, "sess-x", "task-001", "main")
+    (wt / "dirty.txt").write_text("uncommitted edit")           # dirty
+    admin = git_repo / ".git" / "worktrees" / "sess-x"
+    (admin / "locked").write_text("killed mid-run")             # locked (blocks plain remove)
+    remove_worktree(paths, "sess-x")
+    assert not wt.exists()
+    assert not admin.exists()                                   # prune cleared the admin dir
