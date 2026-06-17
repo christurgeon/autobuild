@@ -194,6 +194,38 @@ def test_reconcile_handles_meta_with_pgid(git_repo):
     assert json.loads((sdir / "result.json").read_text())["status"] == "BLOCKED"
 
 
+# ---- task-104: monotonic deadline -------------------------------------------
+
+def test_deadline_is_monotonic_based(git_repo, monkeypatch, stub_pgid):
+    paths = make_project(git_repo)
+    task = write_task(paths)
+    monkeypatch.setattr(session_mod.time, "monotonic", lambda: 1000.0)
+    monkeypatch.setattr(session_mod, "Popen",
+                        lambda argv, **kw: type("P", (), {"poll": lambda s: None})())
+    rs = spawn_session(task, Config(task_timeout_seconds=1800), paths)
+    assert rs.deadline == 1000.0 + 1800
+
+
+def test_deadline_separate_from_wall_clock(git_repo, monkeypatch, stub_pgid):
+    """A wall-clock jump shifts the display-only `started`, NOT the monotonic deadline."""
+    paths = make_project(git_repo)
+    task = write_task(paths)
+    monkeypatch.setattr(session_mod.time, "monotonic", lambda: 500.0)
+
+    class Frozen(session_mod.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return session_mod.datetime(2999, 1, 1, tzinfo=tz)
+
+    monkeypatch.setattr(session_mod, "datetime", Frozen)
+    monkeypatch.setattr(session_mod, "Popen",
+                        lambda argv, **kw: type("P", (), {"poll": lambda s: None})())
+    rs = spawn_session(task, Config(task_timeout_seconds=60), paths)
+    assert rs.deadline == 500.0 + 60                      # from monotonic
+    meta = json.loads((rs.sdir / "meta.json").read_text())
+    assert meta["started"].startswith("2999")            # wall clock is display-only
+
+
 def test_spawn_conflicting_dependency_blocks_with_dep_named(git_repo, diverging_dep):
     """A dependency that cannot be merged into the new worktree base blocks the task,
     and the BLOCKED sentinel names the conflicting dependency."""

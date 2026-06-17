@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -283,6 +284,10 @@ def spawn_session(task: Task, config: Config, paths: Paths) -> RunningSession:
 
     # The child is now live: from here on, never return without its handle — a lost
     # RunningSession would orphan a running process the loop can't reap or kill.
+    # deadline is computed first (it cannot fail) so 105 can always time the child out;
+    # it is monotonic and in-memory only (a crashed supervisor's orphans are reclaimed by
+    # reconcile's kill, not by deadline expiry, and monotonic() isn't cross-process).
+    deadline = time.monotonic() + config.task_timeout_seconds
     pgid: int | None = None
     try:
         pgid = _process_group_id(proc)
@@ -290,4 +295,4 @@ def spawn_session(task: Task, config: Config, paths: Paths) -> RunningSession:
         _atomic_write_json(sdir / "meta.json", meta)
     except OSError as exc:
         _warn(f"session {sid}: could not finalize pgid/meta ({exc}); session still tracked")
-    return RunningSession(sid, tid, sdir, wt, task, proc, pgid=pgid)
+    return RunningSession(sid, tid, sdir, wt, task, proc, pgid=pgid, deadline=deadline)
