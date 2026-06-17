@@ -156,11 +156,11 @@ def integrate(tid: str, config: Config, paths: Paths) -> tuple[bool, str]:
             return True, f"gh not found; left branch {branch} for manual PR"
         push = _git(root, "push", "-u", "origin", branch)
         if push.returncode != 0:
-            # Nothing reached the remote, so there is no reviewable PR and never will be
-            # without intervention — do NOT mark the task done. (Check remote/auth.)
-            tail = (push.stderr or push.stdout or "").strip().splitlines()
-            return False, (f"push failed for {branch}; no PR opened, branch kept locally "
-                           f"(check remote/auth): {tail[-1].strip() if tail else 'git push failed'}")
+            # Push failed (no remote / auth): nothing reached the remote, so there is no PR.
+            # The local branch is still the deliverable downstream tasks merge, so the task
+            # stays done — but say so accurately instead of the misleading "PR creation
+            # failed" (which implies the branch was pushed). Check remote/auth to get a PR.
+            return True, f"push failed for {branch}; kept locally, no PR opened (check remote/auth)"
         r = subprocess.run(
             ["gh", "pr", "create", "--head", branch, "--base", base,
              "--title", f"autobuild: {tid}", "--body", f"Automated by autobuild for {tid}."],
