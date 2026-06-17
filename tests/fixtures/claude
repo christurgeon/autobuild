@@ -50,6 +50,9 @@ def main():
         signal.signal(signal.SIGTERM, _on_term)
     sleep_s = float(os.environ.get("STUB_SLEEP", "0") or "0")
     if sleep_s:
+        if sdir:  # signal readiness AFTER handlers are installed, so a test can kill safely
+            os.makedirs(sdir, exist_ok=True)
+            open(os.path.join(sdir, "stub-ready"), "w").close()
         _time.sleep(sleep_s)
 
     if os.environ.get("STUB_STALL") == "1":

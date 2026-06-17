@@ -282,6 +282,12 @@ def reap_session(sdir: Path, config: Config, paths: Paths) -> bool:
         if task:
             set_status(task.path, "blocked")
         warn(f"{sid}: {tid} NEEDS_HUMAN — see {sdir / 'result.json'}")
+    elif status == "TIMEOUT":
+        # A killed-past-deadline session: a distinct, retryable status. NEVER integrated
+        # or verified (its tree is incomplete), and no follow-ups filed. Retry lands in 106.
+        if task:
+            set_status(task.path, "timeout")
+        warn(f"{sid}: {tid} TIMEOUT — killed past deadline (retry pending in a later task)")
     else:
         warn(f"{sid}: unrecognized status '{status}'")
         return False
@@ -424,17 +430,34 @@ def _harvest(running: list[RunningSession], config: Config, paths: Paths) -> lis
     dropped, leaving a valid result.json unreaped (task stuck in-progress forever).
     """
     survivors: list[RunningSession] = []
+    # Snapshot `now` once: a kill can block up to `grace`, so a session that crosses its
+    # deadline DURING an earlier kill is caught on the next pass — fine, deadlines (>=1800s)
+    # are coarse vs grace (<=10s). Deliberate; do not recompute per session.
+    now = time.monotonic()
     for rs in running:
         kind = _classify_sentinel(rs.sdir)
         if kind == "reapable":
-            continue  # valid sentinel — reap_all handles it (even if still alive,
-            #            so a session that writes its result then lingers can't hang)
+            continue  # (1) a valid sentinel beats everything (even the deadline) — reap_all
+            #             handles it (even if still alive, so a session that writes its
+            #             result then lingers can't hang)
         if rs.alive():
-            survivors.append(rs)  # no usable result yet, still running — let it finish
+            if rs.deadline is not None and now >= rs.deadline:
+                # (3) past deadline, still running, no usable result — kill, then
+                # RE-CLASSIFY: a result written during the grace window must still win.
+                warn(f"{rs.sid} exceeded its deadline; killing {rs.tid}")
+                _kill_group(rs, config.kill_grace_seconds)
+                if _classify_sentinel(rs.sdir) == "reapable":
+                    continue  # finished during grace — reap_all takes the COMPLETE
+                write_sentinel_if_absent(
+                    rs.sdir, rs.tid, "TIMEOUT",
+                    f"session exceeded task_timeout_seconds "
+                    f"({config.task_timeout_seconds}s) and was killed")
+                continue
+            survivors.append(rs)  # (4) within deadline, still running — let it finish
             #                       (an absent or torn/mid-write sentinel under a live
             #                       process is never BLOCKED)
             continue
-        # Process exited without a usable result — BLOCK it (never silently drop).
+        # (2) Process exited without a usable result — BLOCK it (never silently drop).
         if kind == "corrupt":
             warn(f"{rs.sid} exited with an unparseable result.json; marking {rs.tid} BLOCKED")
             write_sentinel_if_absent(rs.sdir, rs.tid, "BLOCKED",
