@@ -14,6 +14,8 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import os
+import signal
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -301,6 +303,36 @@ def reap_all(config: Config, paths: Paths) -> int:
         if sdir.is_dir() and reap_session(sdir, config, paths):
             n += 1
     return n
+
+
+def _signal_session(rs: RunningSession, sig: int) -> None:
+    """Signal the session's whole process group (preferred) or the child directly.
+    ESRCH — the group/child already exited — is suppressed so one dead session never
+    aborts the harvest of the others."""
+    with contextlib.suppress(ProcessLookupError):
+        if rs.pgid is not None:
+            os.killpg(rs.pgid, sig)
+        elif rs.proc is not None:
+            rs.proc.send_signal(sig)
+
+
+def _kill_group(rs: RunningSession, grace: float) -> None:
+    """Terminate a session and reap its child. If already exited, just reap. Otherwise
+    SIGTERM -> wait(grace) -> SIGKILL -> wait(), leaving no zombie."""
+    proc = rs.proc
+    if proc is None:
+        return
+    if proc.poll() is not None:
+        return  # already exited: poll() reaped it
+    _signal_session(rs, signal.SIGTERM)
+    try:
+        proc.wait(timeout=grace)
+        return  # exited within grace -> reaped
+    except subprocess.TimeoutExpired:
+        pass
+    _signal_session(rs, signal.SIGKILL)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=grace)  # reap the zombie
 
 
 def reap_stalled(running: list[RunningSession], paths: Paths) -> None:

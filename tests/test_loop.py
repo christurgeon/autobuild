@@ -1,4 +1,7 @@
 import json
+import os
+import signal
+import time
 
 import pytest
 
@@ -14,9 +17,18 @@ from autobuild.loop import (
     status,
 )
 from autobuild.paths import Paths
-from autobuild.session import RunningSession
+from autobuild.session import RunningSession, spawn_session
 from autobuild.tasks import read_task
 from autobuild.worktree import make_worktree
+
+
+def _spawn_real(paths, stub_bin, tid="task-001", **env):
+    """Spawn one real session through spawn_session (stub on PATH); return the handle."""
+    stub_bin(**env)
+    add_task(paths, tid, status="todo")
+    task = read_task(paths.tasks_dir / f"{tid}.md")
+    return spawn_session(task, Config(claude_cmd="claude", task_timeout_seconds=1800,
+                                      kill_grace_seconds=1), paths)
 
 
 def setup(repo):
@@ -673,3 +685,29 @@ def test_harvest_block_path_refuses_to_clobber_late_valid_result(git_repo):
     loop_mod._harvest([rs], Config(integration="branch"), paths)
     # the real COMPLETE result is reaped, not overwritten by a BLOCKED sentinel
     assert read_task(paths.tasks_dir / "task-001.md").status == "done"
+
+
+# ---- task-105: _kill_group + signal handling -------------------------------
+
+def test_kill_group_reaps_running_child(git_repo, stub_bin):
+    paths = setup(git_repo)
+    rs = _spawn_real(paths, stub_bin, STUB_SLEEP="30", STUB_IGNORE_SIGTERM="1")
+    assert rs.proc.poll() is None                 # alive
+    loop_mod._kill_group(rs, grace=1)
+    assert rs.proc.poll() is not None             # killed + reaped, no zombie
+
+
+def test_kill_group_already_exited_is_noop(git_repo, stub_bin):
+    paths = setup(git_repo)
+    rs = _spawn_real(paths, stub_bin)             # normal stub exits immediately
+    rs.proc.wait()
+    loop_mod._kill_group(rs, grace=1)             # must not raise (ESRCH-safe)
+    assert rs.proc.poll() is not None
+
+
+def test_signal_session_esrch_suppressed(monkeypatch):
+    def raise_esrch(pgid, sig):
+        raise ProcessLookupError
+    monkeypatch.setattr(loop_mod.os, "killpg", raise_esrch)
+    rs = RunningSession("s", "task-001", None, None, None, None, pgid=12345)
+    loop_mod._signal_session(rs, signal.SIGTERM)  # ProcessLookupError suppressed -> no raise

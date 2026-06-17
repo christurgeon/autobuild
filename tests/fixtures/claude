@@ -32,6 +32,26 @@ def main():
     sdir = m_sdir.group(1) if m_sdir else None
     tid = (m_tid.group(1) if m_tid else "unknown").rstrip(".")
 
+    # Kill-path knobs (task-105): ignore SIGTERM, finish-during-grace, or just sleep.
+    import signal
+    import time as _time
+    if os.environ.get("STUB_IGNORE_SIGTERM") == "1":
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if os.environ.get("STUB_COMPLETE_ON_SIGTERM") == "1" and sdir:
+        def _on_term(signum, frame):
+            os.makedirs(sdir, exist_ok=True)
+            tmp = os.path.join(sdir, "result.json.tmp")
+            with open(tmp, "w") as fh:
+                fh.write(json.dumps({"task": tid, "status": "COMPLETE",
+                                     "summary": "finished during grace", "commit": "",
+                                     "followups": []}))
+            os.replace(tmp, os.path.join(sdir, "result.json"))
+            os._exit(0)
+        signal.signal(signal.SIGTERM, _on_term)
+    sleep_s = float(os.environ.get("STUB_SLEEP", "0") or "0")
+    if sleep_s:
+        _time.sleep(sleep_s)
+
     if os.environ.get("STUB_STALL") == "1":
         return 0  # no result.json -> the reaper's stalled path must fire
 
