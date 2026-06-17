@@ -23,7 +23,7 @@ from shutil import which
 from .config import Config
 from .paths import Paths
 from .scheduler import backlog_lock, claim_tasks, runnable_tasks, stuck_tasks
-from .session import RunningSession, spawn_session, write_sentinel
+from .session import RunningSession, spawn_session, write_sentinel_if_absent
 from .tasks import (
     create_task_file,
     is_terminal,
@@ -311,8 +311,8 @@ def reap_stalled(running: list[RunningSession], paths: Paths) -> None:
             continue
         if rs.proc is not None and rs.proc.poll() is not None:
             warn(f"{rs.sid} exited without a result; marking {rs.tid} BLOCKED")
-            write_sentinel(rs.sdir, rs.tid, "BLOCKED",
-                           "session process exited without writing result.json")
+            write_sentinel_if_absent(rs.sdir, rs.tid, "BLOCKED",
+                                     "session process exited without writing result.json")
 
 
 # --- reconcile (startup crash recovery) -------------------------------------
@@ -354,8 +354,8 @@ def reconcile(paths: Paths, *, sweep_in_progress: bool = False) -> None:
                               if kind == "corrupt"
                               else "no result.json was written")
                     warn(f"orphaned in-progress session {sdir.name}; marking {tid} BLOCKED")
-                    write_sentinel(sdir, tid, "BLOCKED",
-                                   f"orphaned: run restarted while session was in-progress; {reason}")
+                    write_sentinel_if_absent(sdir, tid, "BLOCKED",
+                                             f"orphaned: run restarted while session was in-progress; {reason}")
     prune_worktrees(paths)
 
 
@@ -405,12 +405,12 @@ def _harvest(running: list[RunningSession], config: Config, paths: Paths) -> lis
         # Process exited without a usable result — BLOCK it (never silently drop).
         if kind == "corrupt":
             warn(f"{rs.sid} exited with an unparseable result.json; marking {rs.tid} BLOCKED")
-            write_sentinel(rs.sdir, rs.tid, "BLOCKED",
-                           "result.json present but could not be parsed as a JSON object")
+            write_sentinel_if_absent(rs.sdir, rs.tid, "BLOCKED",
+                                     "result.json present but could not be parsed as a JSON object")
         else:  # absent
             warn(f"{rs.sid} exited without a result; marking {rs.tid} BLOCKED")
-            write_sentinel(rs.sdir, rs.tid, "BLOCKED",
-                           "session process exited without writing result.json")
+            write_sentinel_if_absent(rs.sdir, rs.tid, "BLOCKED",
+                                     "session process exited without writing result.json")
     reap_all(config, paths)
     return survivors
 

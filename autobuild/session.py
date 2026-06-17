@@ -5,6 +5,7 @@ RunningSession handle the loop supervises via Popen.poll()."""
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -53,14 +54,67 @@ def build_prompt(sdir: str, task_file: str, wt: str, tid: str) -> str:
     )
 
 
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    """Write JSON to `path` atomically: serialize to a temp file in the SAME directory
+    (so the swap stays on one filesystem), then `os.replace` it over the target. A
+    concurrent reader therefore only ever sees the old complete file or the new one —
+    never a half-written sentinel."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        # On success os.replace already consumed tmp; on any failure (write or swap)
+        # drop the scratch file so a failed write never leaks a stray .tmp.
+        tmp.unlink(missing_ok=True)
+
+
+def _result_is_parseable(sdir: Path) -> bool:
+    """True if result.json already holds a usable JSON object — a real result the
+    harness must not clobber. Mirrors loop._classify_sentinel's "reapable" rule (a valid
+    leading object plus stray trailing junk still counts); kept local so this lower-level
+    module keeps no upward import to loop.py."""
+    try:
+        text = (sdir / "result.json").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        obj = json.loads(text)
+    except ValueError:
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(text.lstrip())
+        except ValueError:
+            return False
+    return isinstance(obj, dict)
+
+
 def write_sentinel(sdir: Path, tid: str, status: str, summary: str,
                    commit: str = "", followups: list | None = None) -> None:
+    """Write the result.json sentinel atomically (temp + os.replace), overwriting any
+    existing file. The atomic primitive; harness-authored paths use the guarded
+    `write_sentinel_if_absent` instead."""
     sdir.mkdir(parents=True, exist_ok=True)
-    (sdir / "result.json").write_text(
-        json.dumps({"task": tid, "status": status, "summary": summary,
-                    "commit": commit, "followups": followups or []}, indent=2),
-        encoding="utf-8",
-    )
+    _atomic_write_json(sdir / "result.json",
+                       {"task": tid, "status": status, "summary": summary,
+                        "commit": commit, "followups": followups or []})
+
+
+def write_sentinel_if_absent(sdir: Path, tid: str, status: str, summary: str,
+                             commit: str = "", followups: list | None = None) -> bool:
+    """Write a sentinel ONLY when it is safe to: refuse if the session was already
+    reaped (reaped.json) or a parseable result.json already exists; otherwise write it
+    atomically. Returns True if written, False if refused.
+
+    Every HARNESS-authored sentinel (worktree-creation BLOCK, exited-without-result
+    BLOCK, orphan BLOCK, a missing-CLI NEEDS_HUMAN) goes through this, so a late-arriving
+    real agent result — or a re-run over an already-reaped session — is never clobbered."""
+    if (sdir / "reaped.json").exists():
+        return False
+    if _result_is_parseable(sdir):
+        return False
+    write_sentinel(sdir, tid, status, summary, commit, followups)
+    return True
 
 
 def _done_dependencies(task: Task, paths: Paths) -> list[str]:
@@ -85,12 +139,12 @@ def spawn_session(task: Task, config: Config, paths: Paths) -> RunningSession:
         # a dependency-merge conflict OR a non-conflict merge failure — surface the
         # specific, actionable reason in the sentinel rather than a generic message.
         set_status(task.path, "blocked")
-        write_sentinel(sdir, tid, "BLOCKED", str(exc))
+        write_sentinel_if_absent(sdir, tid, "BLOCKED", str(exc))
         return RunningSession(sid, tid, sdir, None, task, None)
     except Exception:
         set_status(task.path, "blocked")
-        write_sentinel(sdir, tid, "BLOCKED",
-                       "worktree creation failed; check base_branch in config.yml")
+        write_sentinel_if_absent(sdir, tid, "BLOCKED",
+                                 "worktree creation failed; check base_branch in config.yml")
         return RunningSession(sid, tid, sdir, None, task, None)
 
     (sdir / "meta.json").write_text(json.dumps({
@@ -117,8 +171,8 @@ def spawn_session(task: Task, config: Config, paths: Paths) -> RunningSession:
         err.close()
         # No Claude CLI on PATH: emit NEEDS_HUMAN so the reaper has something
         # deterministic to act on instead of hanging.
-        write_sentinel(sdir, tid, "NEEDS_HUMAN",
-                       f"claude CLI '{config.claude_cmd}' not found on PATH; cannot run session")
+        write_sentinel_if_absent(sdir, tid, "NEEDS_HUMAN",
+                                 f"claude CLI '{config.claude_cmd}' not found on PATH; cannot run session")
         return RunningSession(sid, tid, sdir, wt, task, None)
 
     return RunningSession(sid, tid, sdir, wt, task, proc)
