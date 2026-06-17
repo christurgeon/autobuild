@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -117,6 +118,77 @@ def write_sentinel_if_absent(sdir: Path, tid: str, status: str, summary: str,
     return True
 
 
+# --- session permission posture (task-102) -----------------------------------
+
+class BypassNotPermitted(RuntimeError):
+    """Raised when a permission-bypass posture is requested but the sandbox gate
+    (AUTOBUILD_SANDBOX=1) is not satisfied. str() is the operator-facing reason."""
+
+
+def _note(msg: str) -> None:
+    # Local stderr logger (config.py uses the same pattern) so session.py keeps no
+    # upward import to loop.py, which imports this module.
+    print(f"\033[1;34m[autobuild]\033[0m {msg}", file=sys.stderr)
+
+
+def _warn(msg: str) -> None:
+    print(f"\033[1;33m[warn]\033[0m {msg}", file=sys.stderr)
+
+
+def _allowed_tools(config: Config) -> list[str]:
+    """The --allowedTools list: the configured base tools, plus Bash(git:*) for commits,
+    plus one Bash(<check>:*) per checks entry so the implement phase's checks can run.
+    Deduped, order preserved. This is ergonomics, NOT a security boundary (see README)."""
+    tools = list(config.allowed_tools)
+    tools.append("Bash(git:*)")
+    for c in config.checks:
+        c = c.strip()
+        if c:
+            tools.append(f"Bash({c}:*)")
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in tools:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def _session_flags(config: Config, sdir: Path, *, sandbox: bool) -> list[str]:
+    """Build the permission/tool flags appended to `claude -p`.
+
+    A bypass posture (`dangerously_bypass_permissions`, or `permission_mode:
+    bypassPermissions`) emits `--dangerously-skip-permissions`, but ONLY when the sandbox
+    gate is satisfied (`require_sandbox_for_bypass` is false, or `AUTOBUILD_SANDBOX=1`);
+    otherwise it raises BypassNotPermitted so the caller refuses to spawn. Non-bypass
+    postures emit the permission mode, an allowlist that covers the workflow, a
+    `.claude/**` write-deny, and `--strict-mcp-config`. `--add-dir` is scoped to EXACTLY
+    this session's dir so a confined agent can still write its own result.json (the
+    sentinel-location fix)."""
+    wants_bypass = (config.dangerously_bypass_permissions
+                    or config.permission_mode == "bypassPermissions")
+    flags: list[str] = []
+    if wants_bypass:
+        if config.require_sandbox_for_bypass and not sandbox:
+            raise BypassNotPermitted(
+                "permission bypass requested (dangerously_bypass_permissions or "
+                "permission_mode: bypassPermissions) but AUTOBUILD_SANDBOX is not set — "
+                "refusing to spawn. Run only inside a disposable sandbox with "
+                "AUTOBUILD_SANDBOX=1, or set require_sandbox_for_bypass: false to override "
+                "(strongly discouraged)."
+            )
+        flags.append("--dangerously-skip-permissions")
+    else:
+        flags += ["--permission-mode", config.permission_mode]
+        flags += ["--allowedTools", *_allowed_tools(config)]
+        flags += ["--disallowedTools", "Edit(.claude/**)", "Write(.claude/**)"]
+    flags += ["--add-dir", str(sdir)]
+    flags.append("--strict-mcp-config")
+    if config.session_max_turns:
+        flags += ["--max-turns", str(config.session_max_turns)]
+    return flags
+
+
 def _done_dependencies(task: Task, paths: Paths) -> list[str]:
     """Dependency ids whose task is `done`, in declaration order. The scheduler only
     makes a task runnable once every dep is done, but filter defensively so a direct
@@ -131,6 +203,24 @@ def spawn_session(task: Task, config: Config, paths: Paths) -> RunningSession:
     sdir = paths.sessions_dir / sid
     sdir.mkdir(parents=True, exist_ok=True)
     tid = task.id
+
+    # Resolve the permission posture first: a bypass requested without the sandbox gate
+    # is refused before we build a worktree we'd only throw away.
+    sandbox = os.environ.get("AUTOBUILD_SANDBOX") == "1"
+    try:
+        flags = _session_flags(config, sdir, sandbox=sandbox)
+    except BypassNotPermitted as exc:
+        set_status(task.path, "blocked")
+        write_sentinel_if_absent(sdir, tid, "NEEDS_HUMAN", str(exc))
+        return RunningSession(sid, tid, sdir, None, task, None)
+    if "--dangerously-skip-permissions" in flags and not sandbox:
+        _warn(f"session {sid} for {tid}: running with --dangerously-skip-permissions and NO "
+              f"sandbox (AUTOBUILD_SANDBOX unset) — the agent inherits this machine's git "
+              f"credentials and network. Only acceptable if those are disposable.")
+    else:
+        posture = ("bypassPermissions (AUTOBUILD_SANDBOX)"
+                   if "--dangerously-skip-permissions" in flags else config.permission_mode)
+        _note(f"session {sid} for {tid}: permission posture = {posture}")
 
     try:
         wt = make_worktree(paths, sid, tid, config.base_branch,
@@ -163,7 +253,7 @@ def spawn_session(task: Task, config: Config, paths: Paths) -> RunningSession:
     err = open(sdir / "session.err", "w")
     try:
         proc = Popen(
-            [config.claude_cmd, "-p", prompt, "--model", config.model],
+            [config.claude_cmd, "-p", prompt, "--model", config.model, *flags],
             cwd=str(wt), stdout=out, stderr=err,
         )
     except FileNotFoundError:

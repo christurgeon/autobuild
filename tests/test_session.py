@@ -58,9 +58,14 @@ def test_spawn_invokes_claude_with_expected_argv(git_repo, monkeypatch):
     cfg = Config(model="test-model", claude_cmd="claude")
     rs = spawn_session(task, cfg, paths)
 
-    assert captured["argv"][:2] == ["claude", "-p"]
-    assert captured["argv"][2] == build_prompt(str(rs.sdir), str(task.path), str(rs.worktree), "task-001")
-    assert captured["argv"][3:] == ["--model", "test-model"]
+    # stable prefix: claude -p <prompt> --model <model>, then the permission posture flags
+    assert captured["argv"][:5] == [
+        "claude", "-p",
+        build_prompt(str(rs.sdir), str(task.path), str(rs.worktree), "task-001"),
+        "--model", "test-model",
+    ]
+    assert "--add-dir" in captured["argv"]          # posture flags follow the prefix
+    assert "--strict-mcp-config" in captured["argv"]
     assert str(captured["cwd"]) == str(rs.worktree)
 
 

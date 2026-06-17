@@ -13,6 +13,7 @@ from pathlib import Path
 import yaml
 
 VALID_INTEGRATIONS = ("pr", "auto-merge", "branch")
+VALID_PERMISSION_MODES = ("plan", "default", "acceptEdits", "bypassPermissions")
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,15 @@ class Config:
     checks: list[str] = field(default_factory=list)
     verify_checks: bool = True  # re-run checks in the reaper before integrating
     claude_cmd: str = "claude"
+    # --- session permission posture (task-102) -------------------------------
+    # Default is maximally permissive: full bypass, no sandbox gate, so a session can do
+    # whatever it needs unattended. The trade-off (the agent inherits this machine's git
+    # credentials + network) is the operator's to accept — see the README security note.
+    permission_mode: str = "acceptEdits"  # the fallback posture when bypass is turned off
+    allowed_tools: list[str] = field(default_factory=lambda: ["Edit", "Write", "Read"])
+    session_max_turns: int = 40  # --max-turns; int >= 1
+    dangerously_bypass_permissions: bool = True  # => --dangerously-skip-permissions ...
+    require_sandbox_for_bypass: bool = False  # ... and do NOT require AUTOBUILD_SANDBOX
 
 
 # Top-level keys autobuild understands. Anything else is a likely typo and warned.
@@ -93,6 +103,45 @@ def load_config(path: Path) -> Config:
             return default
         return v
 
+    def want_bool(key: str, default: bool) -> bool:
+        if key not in data:
+            return default
+        v = data[key]
+        if not isinstance(v, bool):
+            problems.append(f"{key} must be a boolean true/false (got {v!r})")
+            return default
+        return v
+
+    def want_enum(key: str, default: str, valid: tuple[str, ...]) -> str:
+        if key not in data:
+            return default
+        v = data[key]
+        if not isinstance(v, str) or v not in valid:
+            problems.append(f"{key} must be one of {', '.join(valid)} (got {v!r})")
+            return default
+        return v
+
+    def want_str_list(key: str, default: list[str]) -> list[str]:
+        if data.get(key) is None:
+            return list(default)
+        v = data[key]
+        if isinstance(v, str):
+            problems.append(
+                f"{key} must be a YAML list of strings, not a single string. "
+                f"Write it as:\n      {key}:\n        - {v!r}"
+            )
+            return list(default)
+        if not isinstance(v, list):
+            problems.append(f"{key} must be a list of non-empty strings (got {type(v).__name__})")
+            return list(default)
+        cleaned: list[str] = []
+        for i, item in enumerate(v):
+            if not isinstance(item, str) or not item.strip():
+                problems.append(f"{key}[{i}] must be a non-empty string (got {item!r})")
+            else:
+                cleaned.append(item)
+        return cleaned
+
     model = want_str("model", defaults.model)
     base_branch = want_str("base_branch", defaults.base_branch)
     claude_cmd = want_str("claude_cmd", defaults.claude_cmd)
@@ -131,6 +180,15 @@ def load_config(path: Path) -> Config:
                     cleaned.append(c)
             checks = cleaned
 
+    permission_mode = want_enum("permission_mode", defaults.permission_mode,
+                                VALID_PERMISSION_MODES)
+    allowed_tools = want_str_list("allowed_tools", defaults.allowed_tools)
+    session_max_turns = want_int("session_max_turns", defaults.session_max_turns)
+    dangerously_bypass_permissions = want_bool(
+        "dangerously_bypass_permissions", defaults.dangerously_bypass_permissions)
+    require_sandbox_for_bypass = want_bool(
+        "require_sandbox_for_bypass", defaults.require_sandbox_for_bypass)
+
     if problems:
         raise ConfigError(problems, path)
 
@@ -143,4 +201,9 @@ def load_config(path: Path) -> Config:
         checks=checks,
         verify_checks=bool(data.get("verify_checks", defaults.verify_checks)),
         claude_cmd=claude_cmd,
+        permission_mode=permission_mode,
+        allowed_tools=allowed_tools,
+        session_max_turns=session_max_turns,
+        dangerously_bypass_permissions=dangerously_bypass_permissions,
+        require_sandbox_for_bypass=require_sandbox_for_bypass,
     )
