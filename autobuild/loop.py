@@ -632,11 +632,27 @@ def status(paths: Paths, config: Config) -> dict:
 # --- clean -------------------------------------------------------------------
 
 def clean(paths: Paths) -> None:
-    log("cleaning finished worktrees and reaped sessions")
+    """Remove reaped sessions and prune detached worktrees — but only when no run is
+    active. Taking the run lock is what makes deletion safe: without it, clean could
+    rmtree a live session's worktree or a COMPLETE-but-unreaped session (losing the
+    result). Refuses (and warns) rather than racing a live run."""
+    paths.ensure_runtime_dirs()
+    try:
+        with run_lock(paths.run_lock):
+            _clean_locked(paths)
+    except RunLockHeld:
+        warn("an 'autobuild run' is active (holds run.lock); skipping clean so it can't "
+             "delete live sessions or prune their worktrees")
+
+
+def _clean_locked(paths: Paths) -> None:
+    log("cleaning reaped sessions and pruning detached worktrees")
     prune_worktrees(paths)
     if paths.sessions_dir.is_dir():
         import shutil
         for sdir in sorted(paths.sessions_dir.iterdir()):
-            if sdir.is_dir() and ((sdir / "reaped.json").exists() or (sdir / "result.json").exists()):
+            # Only `reaped.json` means truly finished. A bare `result.json` can be a
+            # COMPLETE session the reaper hasn't integrated yet — deleting it loses work.
+            if sdir.is_dir() and (sdir / "reaped.json").exists():
                 shutil.rmtree(sdir, ignore_errors=True)
     ok("clean")

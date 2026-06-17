@@ -895,3 +895,28 @@ def test_pr_mode_push_failure_blocks_not_done(git_repo, monkeypatch):
     # git_repo has no 'origin' remote -> push fails before gh is even invoked
     reap_session(paths.sessions_dir / "sess-task-001", Config(integration="pr"), paths)
     assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+
+
+# ---- audit I-5: clean must be lock-aware and keep unreaped results ----------
+
+def test_clean_only_removes_reaped_sessions(git_repo):
+    paths = setup(git_repo)
+    reaped = paths.sessions_dir / "sess-done"
+    reaped.mkdir(parents=True)
+    (reaped / "reaped.json").write_text("{}")
+    unreaped = paths.sessions_dir / "sess-live"
+    unreaped.mkdir(parents=True)
+    (unreaped / "result.json").write_text(json.dumps({"task": "t", "status": "COMPLETE"}))
+    loop_mod.clean(paths)
+    assert not reaped.exists()        # reaped -> removed
+    assert unreaped.exists()          # unreaped COMPLETE -> preserved (used to be destroyed)
+
+
+def test_clean_skips_when_run_active(git_repo):
+    paths = setup(git_repo)
+    s = paths.sessions_dir / "sess-done"
+    s.mkdir(parents=True)
+    (s / "reaped.json").write_text("{}")
+    with loop_mod.run_lock(paths.run_lock):        # simulate an active run holding the lock
+        loop_mod.clean(paths)
+    assert s.exists()                 # clean refused under the lock
