@@ -25,7 +25,12 @@ from shutil import which
 from .config import Config
 from .paths import Paths
 from .scheduler import backlog_lock, claim_tasks, runnable_tasks, stuck_tasks
-from .session import RunningSession, spawn_session, write_sentinel_if_absent
+from .session import (
+    RunningSession,
+    _atomic_write_json,
+    spawn_session,
+    write_sentinel_if_absent,
+)
 from .tasks import (
     create_task_file,
     is_terminal,
@@ -304,11 +309,9 @@ def reap_session(sdir: Path, config: Config, paths: Paths) -> bool:
         return False
 
     remove_worktree(paths, sid)
-    (sdir / "reaped.json").write_text(json.dumps(
-        {"reaped_at": _now(), "status": status, "integrated": integrated,
-         "checks": checks_outcome, "followups": followups},
-        indent=2,
-    ), encoding="utf-8")
+    _atomic_write_json(sdir / "reaped.json",
+                       {"reaped_at": _now(), "status": status, "integrated": integrated,
+                        "checks": checks_outcome, "followups": followups})
     return True
 
 
@@ -348,8 +351,8 @@ def _kill_group(rs: RunningSession, grace: float) -> None:
     except subprocess.TimeoutExpired:
         pass
     _signal_session(rs, signal.SIGKILL)
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        proc.wait(timeout=grace)  # reap the zombie
+    proc.wait()  # SIGKILL is uncatchable; wait unbounded so the child is always reaped
+    #              (a bounded wait could time out and leak a zombie the loop won't reclaim)
 
 
 def reap_stalled(running: list[RunningSession], paths: Paths) -> None:
@@ -459,6 +462,10 @@ def _harvest(running: list[RunningSession], config: Config, paths: Paths) -> lis
                 _kill_group(rs, config.kill_grace_seconds)
                 if _classify_sentinel(rs.sdir) == "reapable":
                     continue  # finished during grace — reap_all takes the COMPLETE
+                # Note the deliberate asymmetry: an absent/corrupt result under a *killed*
+                # session is TIMEOUT (retryable), whereas the same shape from a process
+                # that exited ON ITS OWN (the branch below) is terminal BLOCKED — a killed
+                # agent's torn/missing write shouldn't be held against it as a hard failure.
                 write_sentinel_if_absent(
                     rs.sdir, rs.tid, "TIMEOUT",
                     f"session exceeded task_timeout_seconds "

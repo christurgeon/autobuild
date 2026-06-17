@@ -920,3 +920,18 @@ def test_clean_skips_when_run_active(git_repo):
     with loop_mod.run_lock(paths.run_lock):        # simulate an active run holding the lock
         loop_mod.clean(paths)
     assert s.exists()                 # clean refused under the lock
+
+
+# ---- audit I-6: reaped.json is written atomically --------------------------
+
+def test_reaped_json_written_atomically(git_repo, monkeypatch):
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    sdir = make_session(paths, "task-001", "BLOCKED")
+    calls = []
+    real = loop_mod._atomic_write_json
+    monkeypatch.setattr(loop_mod, "_atomic_write_json",
+                        lambda path, payload: (calls.append(str(path)), real(path, payload))[1])
+    reap_session(sdir, Config(integration="branch"), paths)
+    assert any(c.endswith("reaped.json") for c in calls)
+    assert json.loads((sdir / "reaped.json").read_text())["status"] == "BLOCKED"
