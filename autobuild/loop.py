@@ -64,7 +64,7 @@ def _read_json(path: Path) -> dict | None:
     except OSError:
         return None
     try:
-        return json.loads(text)
+        obj = json.loads(text)
     except ValueError:
         # Tolerate trailing data after a valid JSON object — agents sometimes append
         # stray output (e.g. a closing tag) after the sentinel. Salvage the leading
@@ -75,7 +75,10 @@ def _read_json(path: Path) -> dict | None:
             obj, _ = json.JSONDecoder().raw_decode(text.lstrip())
         except ValueError:
             return None
-        return obj if isinstance(obj, dict) else None
+    # Return only a JSON *object* (dict). A non-dict sentinel (`[]`, `"x"`, `5`) is not a
+    # usable result; returning it would let callers that do `.get()` (reap_session,
+    # collect_status) crash — a single poisoned file would wedge run/reap/status.
+    return obj if isinstance(obj, dict) else None
 
 
 def _classify_sentinel(sdir: Path) -> str:

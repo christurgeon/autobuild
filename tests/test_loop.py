@@ -839,3 +839,44 @@ def test_next_wait_caps_at_nearest_deadline():
 def test_next_wait_uses_sleep_when_no_deadlines():
     rs = RunningSession("s", "t", None, None, None, None, deadline=None)
     assert loop_mod._next_wait([rs], sleep_seconds=2.0, now=0.0) == 2.0
+
+
+# ---- audit C-1: a non-dict result.json must never crash run/reap/status -----
+
+NON_DICT_RESULTS = {"empty-list": "[]", "list-str": '["x"]', "string": '"s"', "number": "5"}
+
+
+@pytest.mark.parametrize("shape", sorted(NON_DICT_RESULTS))
+def test_read_json_non_dict_is_none(git_repo, shape):
+    paths = setup(git_repo)
+    sdir = paths.sessions_dir / "s"
+    sdir.mkdir(parents=True)
+    (sdir / "result.json").write_text(NON_DICT_RESULTS[shape])
+    assert loop_mod._read_json(sdir / "result.json") is None
+
+
+@pytest.mark.parametrize("shape", sorted(NON_DICT_RESULTS))
+def test_reap_session_tolerates_non_dict_result(git_repo, shape):
+    paths = setup(git_repo)
+    sdir = paths.sessions_dir / "sess-x"
+    sdir.mkdir(parents=True)
+    (sdir / "result.json").write_text(NON_DICT_RESULTS[shape])
+    assert reap_session(sdir, Config(integration="branch"), paths) is False  # no crash
+
+
+def test_collect_status_tolerates_non_dict_result(git_repo):
+    paths = setup(git_repo)
+    sdir = paths.sessions_dir / "sess-x"
+    sdir.mkdir(parents=True)
+    (sdir / "result.json").write_text('["x"]')
+    report = collect_status(paths)                       # must not raise
+    assert any(s["session"] == "sess-x" for s in report["sessions"])
+
+
+def test_run_survives_poisoned_sentinel(git_repo):
+    """A non-dict result.json must not crash run() at startup (reconcile -> reap_all)."""
+    paths = setup(git_repo)
+    sdir = paths.sessions_dir / "sess-poison"
+    sdir.mkdir(parents=True)
+    (sdir / "result.json").write_text('["x"]')
+    loop_mod.run(paths, Config(integration="branch"), sleep_seconds=0)  # must return, not crash
