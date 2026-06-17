@@ -204,6 +204,86 @@ def test_aggregates_all_problems(tmp_path):
     assert "checks" in joined
 
 
+# --- task-102: permission posture keys --------------------------------------
+
+def test_permission_posture_defaults(tmp_path):
+    cfg = load_config(tmp_path / "nope.yml")
+    assert cfg.permission_mode == "acceptEdits"
+    assert cfg.allowed_tools == ["Edit", "Write", "Read"]
+    assert cfg.session_max_turns == 40
+    assert cfg.dangerously_bypass_permissions is False
+    assert cfg.require_sandbox_for_bypass is True
+
+
+def test_invalid_permission_mode_raises_listing_valid_values(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, "permission_mode: yolo\n"))
+    msg = str(e.value)
+    assert "permission_mode" in msg
+    assert "acceptEdits" in msg and "bypassPermissions" in msg and "plan" in msg
+
+
+def test_valid_permission_mode_parses(tmp_path):
+    cfg = load_config(_write(tmp_path, "permission_mode: plan\n"))
+    assert cfg.permission_mode == "plan"
+
+
+def test_session_max_turns_zero_raises(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, "session_max_turns: 0\n"))
+    assert "session_max_turns" in str(e.value)
+
+
+def test_allowed_tools_as_bare_string_raises_with_list_hint(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, "allowed_tools: Edit\n"))
+    msg = str(e.value)
+    assert "allowed_tools" in msg
+    assert "list" in msg
+
+
+def test_allowed_tools_list_parses(tmp_path):
+    cfg = load_config(_write(tmp_path, 'allowed_tools:\n  - Edit\n  - "Bash(git:*)"\n'))
+    assert cfg.allowed_tools == ["Edit", "Bash(git:*)"]
+
+
+def test_allowed_tools_empty_element_raises(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, 'allowed_tools:\n  - Edit\n  - ""\n'))
+    assert "allowed_tools" in str(e.value)
+
+
+def test_bypass_flag_must_be_bool(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, "dangerously_bypass_permissions: yes-please\n"))
+    msg = str(e.value)
+    assert "dangerously_bypass_permissions" in msg
+    assert "bool" in msg
+
+
+def test_bypass_flags_parse_as_bool(tmp_path):
+    cfg = load_config(_write(tmp_path,
+        "dangerously_bypass_permissions: true\nrequire_sandbox_for_bypass: false\n"))
+    assert cfg.dangerously_bypass_permissions is True
+    assert cfg.require_sandbox_for_bypass is False
+
+
+def test_aggregates_permission_problems_into_one_error(tmp_path):
+    # the task-102 matrix case: three bad permission keys -> one aggregated ConfigError
+    body = (
+        "permission_mode: yolo\n"
+        "session_max_turns: 0\n"
+        "allowed_tools: Edit\n"
+    )
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, body))
+    joined = "\n".join(e.value.problems)
+    assert len(e.value.problems) >= 3
+    assert "permission_mode" in joined
+    assert "session_max_turns" in joined
+    assert "allowed_tools" in joined
+
+
 def test_config_error_names_path(tmp_path):
     p = _write(tmp_path, "integration: nope\n")
     with pytest.raises(ConfigError) as e:

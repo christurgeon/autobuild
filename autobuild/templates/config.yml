@@ -26,3 +26,19 @@ checks:
 verify_checks: true
 
 claude_cmd: claude            # override if your Claude CLI binary differs
+
+# --- session permission posture ---------------------------------------------
+# How much a spawned `claude -p` session may do unattended. NOTE: the allowlist is
+# ergonomics, NOT a security boundary — `Bash(git:*)` is ~a full shell. The only real
+# isolation is running autobuild inside a disposable sandbox VM. See the README.
+permission_mode: acceptEdits  # plan | default | acceptEdits | bypassPermissions
+allowed_tools:                # base tools; Bash(git:*) + one Bash(<check>:*) auto-added
+  - Edit
+  - Write
+  - Read
+session_max_turns: 40         # integer >= 1: --max-turns cap per session
+
+# bypassPermissions (--dangerously-skip-permissions) is the intended mode INSIDE a
+# sandbox VM, but is hard-refused unless you opt in AND prove the sandbox:
+dangerously_bypass_permissions: false  # true => request the bypass posture
+require_sandbox_for_bypass: true       # ... allowed only if AUTOBUILD_SANDBOX=1, else refuse
