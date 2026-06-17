@@ -27,11 +27,14 @@ class Config:
     verify_checks: bool = True  # re-run checks in the reaper before integrating
     claude_cmd: str = "claude"
     # --- session permission posture (task-102) -------------------------------
-    permission_mode: str = "acceptEdits"  # plan | default | acceptEdits | bypassPermissions
+    # Default is maximally permissive: full bypass, no sandbox gate, so a session can do
+    # whatever it needs unattended. The trade-off (the agent inherits this machine's git
+    # credentials + network) is the operator's to accept — see the README security note.
+    permission_mode: str = "acceptEdits"  # the fallback posture when bypass is turned off
     allowed_tools: list[str] = field(default_factory=lambda: ["Edit", "Write", "Read"])
     session_max_turns: int = 40  # --max-turns; int >= 1
-    dangerously_bypass_permissions: bool = False  # => --dangerously-skip-permissions ...
-    require_sandbox_for_bypass: bool = True  # ... only if AUTOBUILD_SANDBOX=1, else refuse
+    dangerously_bypass_permissions: bool = True  # => --dangerously-skip-permissions ...
+    require_sandbox_for_bypass: bool = False  # ... and do NOT require AUTOBUILD_SANDBOX
 
 
 # Top-level keys autobuild understands. Anything else is a likely typo and warned.

@@ -208,11 +208,12 @@ def test_aggregates_all_problems(tmp_path):
 
 def test_permission_posture_defaults(tmp_path):
     cfg = load_config(tmp_path / "nope.yml")
-    assert cfg.permission_mode == "acceptEdits"
+    # default is maximally permissive: full bypass, no sandbox gate (operator's choice)
+    assert cfg.permission_mode == "acceptEdits"  # the fallback when bypass is turned off
     assert cfg.allowed_tools == ["Edit", "Write", "Read"]
     assert cfg.session_max_turns == 40
-    assert cfg.dangerously_bypass_permissions is False
-    assert cfg.require_sandbox_for_bypass is True
+    assert cfg.dangerously_bypass_permissions is True
+    assert cfg.require_sandbox_for_bypass is False
 
 
 def test_invalid_permission_mode_raises_listing_valid_values(tmp_path):

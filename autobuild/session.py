@@ -131,6 +131,10 @@ def _note(msg: str) -> None:
     print(f"\033[1;34m[autobuild]\033[0m {msg}", file=sys.stderr)
 
 
+def _warn(msg: str) -> None:
+    print(f"\033[1;33m[warn]\033[0m {msg}", file=sys.stderr)
+
+
 def _allowed_tools(config: Config) -> list[str]:
     """The --allowedTools list: the configured base tools, plus Bash(git:*) for commits,
     plus one Bash(<check>:*) per checks entry so the implement phase's checks can run.
@@ -209,9 +213,14 @@ def spawn_session(task: Task, config: Config, paths: Paths) -> RunningSession:
         set_status(task.path, "blocked")
         write_sentinel_if_absent(sdir, tid, "NEEDS_HUMAN", str(exc))
         return RunningSession(sid, tid, sdir, None, task, None)
-    posture = ("bypassPermissions (AUTOBUILD_SANDBOX)"
-               if "--dangerously-skip-permissions" in flags else config.permission_mode)
-    _note(f"session {sid} for {tid}: permission posture = {posture}")
+    if "--dangerously-skip-permissions" in flags and not sandbox:
+        _warn(f"session {sid} for {tid}: running with --dangerously-skip-permissions and NO "
+              f"sandbox (AUTOBUILD_SANDBOX unset) — the agent inherits this machine's git "
+              f"credentials and network. Only acceptable if those are disposable.")
+    else:
+        posture = ("bypassPermissions (AUTOBUILD_SANDBOX)"
+                   if "--dangerously-skip-permissions" in flags else config.permission_mode)
+        _note(f"session {sid} for {tid}: permission posture = {posture}")
 
     try:
         wt = make_worktree(paths, sid, tid, config.base_branch,

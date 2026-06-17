@@ -64,8 +64,8 @@ def test_spawn_invokes_claude_with_expected_argv(git_repo, monkeypatch):
         build_prompt(str(rs.sdir), str(task.path), str(rs.worktree), "task-001"),
         "--model", "test-model",
     ]
-    assert "--permission-mode" in captured["argv"]
-    assert "--add-dir" in captured["argv"]
+    assert "--add-dir" in captured["argv"]          # posture flags follow the prefix
+    assert "--strict-mcp-config" in captured["argv"]
     assert str(captured["cwd"]) == str(rs.worktree)
 
 

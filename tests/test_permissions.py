@@ -73,7 +73,8 @@ def test_sentinel_path_is_within_an_add_dir_location(tmp_path):
 
 def test_acceptedits_allowlist_covers_checks_and_git_commit(tmp_path):
     _, sdir = session_dir(tmp_path)
-    cfg = Config(permission_mode="acceptEdits", checks=["uv run pytest", "ruff check"])
+    cfg = Config(permission_mode="acceptEdits", dangerously_bypass_permissions=False,
+                 checks=["uv run pytest", "ruff check"])
     flags = _session_flags(cfg, sdir, sandbox=False)
     assert flags[:2] == ["--permission-mode", "acceptEdits"]
     allowed = values_after(flags, "--allowedTools")
@@ -87,7 +88,8 @@ def test_acceptedits_allowlist_covers_checks_and_git_commit(tmp_path):
 
 def test_strict_mcp_and_claude_deny_present(tmp_path):
     _, sdir = session_dir(tmp_path)
-    flags = _session_flags(Config(), sdir, sandbox=False)
+    # the .claude deny lives in the non-bypass posture (bypass skips perms entirely)
+    flags = _session_flags(Config(dangerously_bypass_permissions=False), sdir, sandbox=False)
     assert "--strict-mcp-config" in flags
     disallowed = values_after(flags, "--disallowedTools")
     assert any(".claude" in d for d in disallowed)      # deny writes to .claude/**
@@ -99,11 +101,23 @@ def test_max_turns_emitted_when_set(tmp_path):
     assert values_after(flags, "--max-turns") == ["40"]
 
 
+# ---- default posture is full bypass (operator's chosen default) -------------
+
+def test_default_config_requests_full_bypass_without_a_gate(tmp_path):
+    """The shipped default is maximally permissive: --dangerously-skip-permissions with
+    no sandbox required (no refusal even when sandbox=False)."""
+    _, sdir = session_dir(tmp_path)
+    flags = _session_flags(Config(), sdir, sandbox=False)
+    assert "--dangerously-skip-permissions" in flags
+    assert "--permission-mode" not in flags  # bypass branch, not the allowlist branch
+
+
 # ---- env-gated bypass -------------------------------------------------------
 
 def test_bypass_refused_without_sandbox(tmp_path):
     _, sdir = session_dir(tmp_path)
-    cfg = Config(dangerously_bypass_permissions=True)  # require_sandbox_for_bypass default True
+    # opt back INTO the gate to exercise the refusal (default ships with the gate off)
+    cfg = Config(dangerously_bypass_permissions=True, require_sandbox_for_bypass=True)
     with pytest.raises(BypassNotPermitted):
         _session_flags(cfg, sdir, sandbox=False)
 
@@ -116,9 +130,10 @@ def test_bypass_permitted_with_sandbox(tmp_path):
 
 
 def test_permission_mode_bypass_enum_is_also_gated(tmp_path):
-    """Setting the enum directly must be gated too, else it's an un-gated bypass."""
+    """Setting the enum directly must be gated too (when the gate is on), else it's an
+    un-gated bypass via a different key."""
     _, sdir = session_dir(tmp_path)
-    cfg = Config(permission_mode="bypassPermissions")
+    cfg = Config(permission_mode="bypassPermissions", require_sandbox_for_bypass=True)
     with pytest.raises(BypassNotPermitted):
         _session_flags(cfg, sdir, sandbox=False)
     flags = _session_flags(cfg, sdir, sandbox=True)
@@ -152,7 +167,8 @@ def test_hostile_claude_repo_gets_neutralization_flags(git_repo, monkeypatch):
     monkeypatch.setattr(session_mod, "Popen",
                         lambda argv, **kw: (captured.update(argv=argv),
                                             type("P", (), {"poll": lambda s: None})())[1])
-    spawn_session(task, Config(), paths)
+    # the neutralization flags live in the non-bypass posture
+    spawn_session(task, Config(dangerously_bypass_permissions=False), paths)
     argv = captured["argv"]
     assert "--strict-mcp-config" in argv
     assert any(".claude" in a for a in argv)
@@ -163,7 +179,8 @@ def test_hostile_claude_repo_gets_neutralization_flags(git_repo, monkeypatch):
 def test_spawn_refuses_bypass_without_sandbox(git_repo):
     paths = make_project(git_repo)
     task = write_task(paths)
-    cfg = Config(dangerously_bypass_permissions=True)  # AUTOBUILD_SANDBOX unset in hermetic env
+    # gate opted back on; AUTOBUILD_SANDBOX unset in hermetic env -> refuse
+    cfg = Config(dangerously_bypass_permissions=True, require_sandbox_for_bypass=True)
     rs = spawn_session(task, cfg, paths)
     assert rs.proc is None
     result = json.loads((rs.sdir / "result.json").read_text())

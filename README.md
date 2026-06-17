@@ -94,11 +94,11 @@ verify_checks: true           # reaper re-runs `checks` in the worktree before
 
 claude_cmd: claude            # override if your CLI binary is named differently
 
-permission_mode: acceptEdits  # plan | default | acceptEdits | bypassPermissions
-allowed_tools: [Edit, Write, Read]   # + Bash(git:*) and one Bash(<check>:*) per check
+dangerously_bypass_permissions: true  # DEFAULT: full --dangerously-skip-permissions ...
+require_sandbox_for_bypass: false     # ... with no AUTOBUILD_SANDBOX gate (see warning below)
+permission_mode: acceptEdits  # used only when bypass is OFF: plan|default|acceptEdits|bypassPermissions
+allowed_tools: [Edit, Write, Read]   # (fenced mode) + Bash(git:*) and one Bash(<check>:*) per check
 session_max_turns: 40         # --max-turns cap per session (int >= 1)
-dangerously_bypass_permissions: false # request --dangerously-skip-permissions ...
-require_sandbox_for_bypass: true      # ... allowed only if AUTOBUILD_SANDBOX=1, else refuse
 ```
 
 ## Security posture (read before running unattended)
@@ -106,15 +106,20 @@ require_sandbox_for_bypass: true      # ... allowed only if AUTOBUILD_SANDBOX=1,
 A spawned session is a headless `claude -p` acting on your repo with little supervision.
 Be honest about where the boundary is:
 
+- **The default is full bypass (`--dangerously-skip-permissions`), no sandbox gate.** Out
+  of the box a session does whatever it needs without prompts — and inherits **this
+  machine's git credentials and network**. A prompt-injected `GOAL.md`/task could push to
+  your remote or exfiltrate. This is the right default *only* when those are disposable
+  (a sandbox VM, or no-push credentials). autobuild prints a loud warning on every
+  un-sandboxed bypass spawn. To run fenced, set `dangerously_bypass_permissions: false`.
+- **To fence it, re-arm the gate.** Set `require_sandbox_for_bypass: true` and autobuild
+  will **refuse to spawn** a bypass session unless `AUTOBUILD_SANDBOX=1` is set — the
+  sandbox-only posture. With bypass off entirely, `permission_mode`/`allowed_tools` apply.
 - **The allowlist is ergonomics, not a security boundary.** `--allowedTools` with
   `Bash(git:*)` is approximately a full shell (`git config core.pager=…`, command
   chaining, etc. all escape it). **The only real isolation is running autobuild inside a
   disposable sandbox VM.** `permission_mode`/`allowed_tools` keep an *honest* agent on the
   rails; they do not contain a hostile or prompt-injected one.
-- **`bypassPermissions` is sandbox-only.** `--dangerously-skip-permissions` is the intended
-  mode *inside* a sandbox, but autobuild **refuses to spawn** unless
-  `dangerously_bypass_permissions: true` **and** `AUTOBUILD_SANDBOX=1` is set (override the
-  gate with `require_sandbox_for_bypass: false` only if you accept the risk).
 - **`integration: pr` is only safe when the agent has no push credentials and no network.**
   An autonomous (or prompt-injected via `GOAL.md`/task files) agent with ambient git creds
   could `git push origin HEAD:main` and bypass the verify-before-integrate gate. Pushing
