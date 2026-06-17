@@ -93,7 +93,36 @@ verify_checks: true           # reaper re-runs `checks` in the worktree before
                               # false -> trust the agent, skip the re-run.
 
 claude_cmd: claude            # override if your CLI binary is named differently
+
+permission_mode: acceptEdits  # plan | default | acceptEdits | bypassPermissions
+allowed_tools: [Edit, Write, Read]   # + Bash(git:*) and one Bash(<check>:*) per check
+session_max_turns: 40         # --max-turns cap per session (int >= 1)
+dangerously_bypass_permissions: false # request --dangerously-skip-permissions ...
+require_sandbox_for_bypass: true      # ... allowed only if AUTOBUILD_SANDBOX=1, else refuse
 ```
+
+## Security posture (read before running unattended)
+
+A spawned session is a headless `claude -p` acting on your repo with little supervision.
+Be honest about where the boundary is:
+
+- **The allowlist is ergonomics, not a security boundary.** `--allowedTools` with
+  `Bash(git:*)` is approximately a full shell (`git config core.pager=…`, command
+  chaining, etc. all escape it). **The only real isolation is running autobuild inside a
+  disposable sandbox VM.** `permission_mode`/`allowed_tools` keep an *honest* agent on the
+  rails; they do not contain a hostile or prompt-injected one.
+- **`bypassPermissions` is sandbox-only.** `--dangerously-skip-permissions` is the intended
+  mode *inside* a sandbox, but autobuild **refuses to spawn** unless
+  `dangerously_bypass_permissions: true` **and** `AUTOBUILD_SANDBOX=1` is set (override the
+  gate with `require_sandbox_for_bypass: false` only if you accept the risk).
+- **`integration: pr` is only safe when the agent has no push credentials and no network.**
+  An autonomous (or prompt-injected via `GOAL.md`/task files) agent with ambient git creds
+  could `git push origin HEAD:main` and bypass the verify-before-integrate gate. Pushing
+  stays the *harness's* job, after verification — so withhold credentials/egress from the
+  session environment.
+- **A cloned target repo's `.claude/` is hostile input.** Its hooks would run with the
+  agent's privileges; autobuild passes `--strict-mcp-config` and denies writes to
+  `.claude/**`, but the real containment is still the VM.
 
 ## Why not just `/loop`?
 
