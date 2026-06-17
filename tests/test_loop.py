@@ -490,6 +490,107 @@ def test_harvest_keeps_live_session(git_repo):
     assert survivors == [rs]
 
 
+# ---- bug fix: a present-but-unparseable sentinel must not strand a task ------
+# raw_decode salvages trailing junk after a valid object; these are the shapes it
+# CANNOT salvage (leading garbage, empty, non-object) and which used to fall through
+# every gate (reconcile / _harvest / reap_session) and strand the task forever.
+CORRUPT_SENTINELS = {
+    "leading-garbage": 'oops a preamble\n{"task": "task-001", "status": "COMPLETE"}\n',
+    "empty": "",
+    "whitespace": "   \n\t\n",
+    "json-list": "[]",
+    "json-string": '"x"',
+}
+
+
+@pytest.mark.parametrize("shape", sorted(CORRUPT_SENTINELS))
+def test_classify_sentinel_corrupt(git_repo, shape):
+    paths = setup(git_repo)
+    sdir = paths.sessions_dir / "sess-task-001"
+    sdir.mkdir(parents=True)
+    (sdir / "result.json").write_text(CORRUPT_SENTINELS[shape], encoding="utf-8")
+    assert loop_mod._classify_sentinel(sdir) == "corrupt"
+
+
+def test_classify_sentinel_absent_and_reapable(git_repo):
+    paths = setup(git_repo)
+    sdir = paths.sessions_dir / "sess-task-001"
+    sdir.mkdir(parents=True)
+    assert loop_mod._classify_sentinel(sdir) == "absent"
+    # a valid object plus trailing junk is salvageable -> reapable, not corrupt
+    (sdir / "result.json").write_text(
+        '{"task": "task-001", "status": "COMPLETE", "summary": "s"}\n</content>\n', encoding="utf-8")
+    assert loop_mod._classify_sentinel(sdir) == "reapable"
+
+
+@pytest.mark.parametrize("shape", sorted(CORRUPT_SENTINELS))
+def test_harvest_blocks_exited_session_with_corrupt_sentinel(git_repo, shape):
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    sid = "sess-task-001"
+    sdir = paths.sessions_dir / sid
+    sdir.mkdir(parents=True)
+    (sdir / "meta.json").write_text(json.dumps({"task": "task-001", "branch": "autobuild/task-001"}))
+    (sdir / "result.json").write_text(CORRUPT_SENTINELS[shape], encoding="utf-8")
+    rs = RunningSession(sid, "task-001", sdir, paths.worktrees_dir / sid, None, _Exited())
+    survivors = loop_mod._harvest([rs], Config(integration="branch"), paths)
+    assert survivors == []
+    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+
+
+def test_harvest_spares_live_session_with_torn_sentinel(git_repo):
+    """A corrupt result.json under a STILL-RUNNING process is a torn/in-flight write;
+    leave it to finish — never BLOCK a live session."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    sid = "sess-task-001"
+    sdir = paths.sessions_dir / sid
+    sdir.mkdir(parents=True)
+    (sdir / "result.json").write_text('{"task": "task-001"', encoding="utf-8")  # mid-write
+    rs = RunningSession(sid, "task-001", sdir, None, None, _Alive())
+    survivors = loop_mod._harvest([rs], Config(integration="branch"), paths)
+    assert survivors == [rs]
+    assert read_task(paths.tasks_dir / "task-001.md").status == "in-progress"
+
+
+def test_harvest_reaps_valid_result_even_while_process_alive(git_repo):
+    """A valid sentinel is reaped even if the process hasn't exited yet, so a session
+    that writes its result then lingers cannot hang the loop (no regression)."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    sdir = make_session(paths, "task-001", "COMPLETE")
+    rs = RunningSession("sess-task-001", "task-001", sdir,
+                        paths.worktrees_dir / "sess-task-001", None, _Alive())
+    survivors = loop_mod._harvest([rs], Config(integration="branch"), paths)
+    assert survivors == []
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"
+
+
+@pytest.mark.parametrize("shape", sorted(CORRUPT_SENTINELS))
+def test_reconcile_blocks_in_progress_with_corrupt_sentinel(git_repo, shape):
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    sdir = paths.sessions_dir / "sess-task-001"
+    sdir.mkdir(parents=True)
+    (sdir / "meta.json").write_text(json.dumps({"task": "task-001", "branch": "autobuild/task-001"}))
+    (sdir / "result.json").write_text(CORRUPT_SENTINELS[shape], encoding="utf-8")
+    reconcile(paths, sweep_in_progress=True)
+    reap_all(Config(integration="branch"), paths)
+    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+
+
+def test_reconcile_leaves_reapable_sentinel_for_reaper(git_repo):
+    """A valid sentinel on an in-progress task is the reaper's job; reconcile must not
+    clobber it with BLOCKED."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    sdir = make_session(paths, "task-001", "COMPLETE")
+    reconcile(paths, sweep_in_progress=True)
+    assert json.loads((sdir / "result.json").read_text())["status"] == "COMPLETE"
+    reap_all(Config(integration="branch"), paths)
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"
+
+
 # ---- status surfaces stuck tasks -------------------------------------------
 
 def test_collect_status_includes_stuck(git_repo):

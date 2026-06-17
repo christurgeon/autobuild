@@ -76,6 +76,22 @@ def _read_json(path: Path) -> dict | None:
         return obj if isinstance(obj, dict) else None
 
 
+def _classify_sentinel(sdir: Path) -> str:
+    """Classify a session's result.json:
+      'reapable' — present and parses to a usable JSON object (a dict);
+      'corrupt'  — present but unparseable (leading garbage / empty) or not an object
+                   (`[]`, `"x"`) — shapes raw_decode cannot salvage;
+      'absent'   — no result.json yet.
+
+    Centralizing this is what lets every gate (`_harvest`, `reconcile`) treat a
+    present-but-unparseable sentinel as a finished-but-failed session and BLOCK it,
+    instead of skipping it on mere file existence and stranding the task forever."""
+    result_file = sdir / "result.json"
+    if not result_file.exists():
+        return "absent"
+    return "reapable" if isinstance(_read_json(result_file), dict) else "corrupt"
+
+
 # --- run lock ----------------------------------------------------------------
 
 class RunLockHeld(RuntimeError):
@@ -323,18 +339,23 @@ def reconcile(paths: Paths, *, sweep_in_progress: bool = False) -> None:
             for sdir in sorted(paths.sessions_dir.iterdir()):
                 if not sdir.is_dir():
                     continue
-                if (sdir / "result.json").exists() or (sdir / "reaped.json").exists():
+                if (sdir / "reaped.json").exists():
                     continue
+                kind = _classify_sentinel(sdir)
+                if kind == "reapable":
+                    continue  # a finished session — the reaper handles it, not us
                 meta = _read_json(sdir / "meta.json")
                 if not meta:
                     continue
                 tid = str(meta.get("task", ""))
                 task = index.get(tid)
                 if task and task.status == "in-progress":
+                    reason = ("result.json present but could not be parsed as a JSON object"
+                              if kind == "corrupt"
+                              else "no result.json was written")
                     warn(f"orphaned in-progress session {sdir.name}; marking {tid} BLOCKED")
                     write_sentinel(sdir, tid, "BLOCKED",
-                                   "orphaned: run restarted while session was in-progress; "
-                                   "no result.json was written")
+                                   f"orphaned: run restarted while session was in-progress; {reason}")
     prune_worktrees(paths)
 
 
@@ -372,15 +393,21 @@ def _harvest(running: list[RunningSession], config: Config, paths: Paths) -> lis
     """
     survivors: list[RunningSession] = []
     for rs in running:
-        if rs.has_result():
-            continue  # finished; the reap_all below acts on its sentinel
+        kind = _classify_sentinel(rs.sdir)
+        if kind == "reapable":
+            continue  # valid sentinel — reap_all handles it (even if still alive,
+            #            so a session that writes its result then lingers can't hang)
         if rs.alive():
-            survivors.append(rs)
+            survivors.append(rs)  # no usable result yet, still running — let it finish
+            #                       (an absent or torn/mid-write sentinel under a live
+            #                       process is never BLOCKED)
             continue
-        # The process exited without a result. Re-check first: it may have written
-        # the sentinel just before exiting (the contract is write-then-exit), in
-        # which case reap_all handles it; only a genuinely empty exit is BLOCKED.
-        if not rs.has_result():
+        # Process exited without a usable result — BLOCK it (never silently drop).
+        if kind == "corrupt":
+            warn(f"{rs.sid} exited with an unparseable result.json; marking {rs.tid} BLOCKED")
+            write_sentinel(rs.sdir, rs.tid, "BLOCKED",
+                           "result.json present but could not be parsed as a JSON object")
+        else:  # absent
             warn(f"{rs.sid} exited without a result; marking {rs.tid} BLOCKED")
             write_sentinel(rs.sdir, rs.tid, "BLOCKED",
                            "session process exited without writing result.json")

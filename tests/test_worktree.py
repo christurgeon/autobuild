@@ -3,6 +3,7 @@ import pytest
 from autobuild.paths import Paths
 from autobuild.worktree import (
     DependencyMergeConflict,
+    DependencyMergeError,
     branch_name,
     make_worktree,
     prune_worktrees,
@@ -153,3 +154,36 @@ def test_make_worktree_conflicting_dependency_raises_and_leaves_clean(git_repo, 
     wt = paths.worktrees_dir / "sess-x"
     assert git(wt, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).returncode != 0
     assert git(wt, "status", "--porcelain").stdout.strip() == ""
+
+
+def test_make_worktree_non_conflict_merge_failure_is_distinct(git_repo, git, tmp_path, monkeypatch):
+    """A dependency merge that fails for a reason OTHER than a content conflict (e.g.
+    no committer identity) must NOT be mislabeled a conflict: it raises the distinct
+    DependencyMergeError with an actionable message, and still leaves a clean tree."""
+    paths = Paths(git_repo)
+    _dep_branch(git, git_repo, tmp_path, "task-001", "main", "dep.txt", "from dep\n")
+
+    # strip committer identity so the --no-ff merge commit fails cleanly (no conflict).
+    # useConfigOnly stops git from auto-deriving an identity from username@hostname.
+    for var in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+        monkeypatch.delenv(var, raising=False)
+    git(git_repo, "config", "--unset", "user.name")
+    git(git_repo, "config", "--unset", "user.email")
+    git(git_repo, "config", "user.useConfigOnly", "true")
+
+    with pytest.raises(DependencyMergeError) as exc:
+        make_worktree(paths, "sess-x", "task-002", "main", ["task-001"])
+    msg = str(exc.value)
+    assert "task-001" in msg
+    assert "identity" in msg.lower() or "user.name" in msg.lower()  # actionable
+
+    wt = paths.worktrees_dir / "sess-x"
+    assert git(wt, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).returncode != 0
+    assert git(wt, "status", "--porcelain").stdout.strip() == ""
+
+
+def test_dependency_merge_errors_are_distinct_types():
+    # DependencyMergeError must not be caught by `except DependencyMergeConflict`,
+    # and vice versa — callers distinguish a content conflict from other failures.
+    assert not issubclass(DependencyMergeError, DependencyMergeConflict)
+    assert not issubclass(DependencyMergeConflict, DependencyMergeError)

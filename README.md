@@ -135,6 +135,18 @@ The e2e tests drive the whole loop with a stub `claude` on `PATH` (see
 order. Design notes and the porting decisions live in
 `docs/superpowers/plans/2026-06-16-python-port.md`.
 
+## Limitations
+
+**Dependency chains in `pr` mode produce stacked history.** So a dependent task can
+see its dependencies' code in every integration mode, each session's worktree merges
+its `done` dependencies' `autobuild/<dep>` branches onto its base. Under `auto-merge`
+the dependency already landed on `base_branch`, so this is a no-op. Under `pr` (and
+`branch`), the dependency's commits live only on its own branch, so a dependent's
+branch — and therefore its PR — *contains its dependencies' commits*. For a chain
+A → B → C you'll get stacked/overlapping diffs across the PRs. If you run a dependency
+chain in `pr` mode, review/merge the PRs in dependency order (or merge them onto an
+integration branch and open a single PR), rather than expecting independent diffs.
+
 ## License
 
 MIT
