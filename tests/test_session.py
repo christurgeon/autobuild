@@ -1,7 +1,9 @@
 import json
+import os
 
 from autobuild.config import Config
 from autobuild.paths import Paths
+from autobuild import loop as loop_mod
 from autobuild import session as session_mod
 from autobuild.session import build_prompt, new_session_id, spawn_session
 from autobuild.tasks import read_task
@@ -40,7 +42,7 @@ def test_new_session_id_unique_and_prefixed():
 
 # ---- spawn ------------------------------------------------------------------
 
-def test_spawn_invokes_claude_with_expected_argv(git_repo, monkeypatch):
+def test_spawn_invokes_claude_with_expected_argv(git_repo, monkeypatch, stub_pgid):
     paths = make_project(git_repo)
     task = write_task(paths)
     captured = {}
@@ -69,7 +71,7 @@ def test_spawn_invokes_claude_with_expected_argv(git_repo, monkeypatch):
     assert str(captured["cwd"]) == str(rs.worktree)
 
 
-def test_spawn_writes_meta_and_sets_in_progress(git_repo, monkeypatch):
+def test_spawn_writes_meta_and_sets_in_progress(git_repo, monkeypatch, stub_pgid):
     paths = make_project(git_repo)
     task = write_task(paths)
     monkeypatch.setattr(session_mod, "Popen",
@@ -116,6 +118,112 @@ def test_spawn_real_stub_produces_result_and_commit(git_repo, stub_bin):
     assert result["status"] == "COMPLETE"
     assert result["task"] == "task-001"
     assert result["commit"]  # the stub committed in the worktree
+
+
+# ---- task-104: process group + pgid -----------------------------------------
+
+def test_spawn_passes_start_new_session(git_repo, monkeypatch, stub_pgid):
+    paths = make_project(git_repo)
+    task = write_task(paths)
+    captured = {}
+
+    def fake_popen(argv, **kw):
+        captured.update(kw)
+        return type("P", (), {"poll": lambda s: None})()
+
+    monkeypatch.setattr(session_mod, "Popen", fake_popen)
+    spawn_session(task, Config(), paths)
+    assert captured.get("start_new_session") is True
+
+
+def test_spawn_child_is_group_leader_and_pgid_persisted(git_repo, monkeypatch):
+    """A REAL long-lived child launched via the real spawn path is its own group
+    leader; its pgid is captured on the handle and atomically in meta.json. This is
+    the ONLY test that exercises the real os.getpgid."""
+    paths = make_project(git_repo)
+    task = write_task(paths)
+    real_popen = session_mod.Popen
+    spawned = {}
+
+    def slow_popen(argv, **kw):
+        p = real_popen(["sleep", "5"], **kw)  # honors start_new_session in kw
+        spawned["p"] = p
+        return p
+
+    monkeypatch.setattr(session_mod, "Popen", slow_popen)
+    rs = spawn_session(task, Config(), paths)
+    try:
+        assert rs.pgid == rs.proc.pid                   # leader: pgid == pid
+        assert os.getpgid(rs.proc.pid) == rs.proc.pid   # confirmed live
+        assert json.loads((rs.sdir / "meta.json").read_text())["pgid"] == rs.proc.pid
+    finally:
+        p = spawned.get("p")                            # guard; don't mask a real error
+        if p is not None:
+            p.terminate()
+            p.wait()
+
+
+def test_process_group_id_none_when_child_gone(monkeypatch):
+    """ESRCH (child already exited/reaped) -> None, not a stale pid."""
+    def raise_esrch(pid):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(session_mod.os, "getpgid", raise_esrch)
+    fake = type("P", (), {"pid": 999})()
+    assert session_mod._process_group_id(fake) is None
+
+
+def test_missing_claude_returns_no_pgid_or_deadline(git_repo):
+    """FileNotFoundError path: no live child, so pgid and deadline stay None."""
+    paths = make_project(git_repo)
+    task = write_task(paths)
+    rs = spawn_session(task, Config(claude_cmd="definitely-not-real-xyz"), paths)
+    assert rs.proc is None and rs.pgid is None and rs.deadline is None
+
+
+def test_reconcile_handles_meta_with_pgid(git_repo):
+    """Regression: meta.json now carries pgid; reconcile still BLOCKs an orphan."""
+    from tests.test_loop import setup, add_task
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    sdir = paths.sessions_dir / "sess-x"
+    sdir.mkdir(parents=True)
+    (sdir / "meta.json").write_text(json.dumps(
+        {"task": "task-001", "branch": "autobuild/task-001", "pgid": 4242}))
+    loop_mod.reconcile(paths, sweep_in_progress=True)
+    assert json.loads((sdir / "result.json").read_text())["status"] == "BLOCKED"
+
+
+# ---- task-104: monotonic deadline -------------------------------------------
+
+def test_deadline_is_monotonic_based(git_repo, monkeypatch, stub_pgid):
+    paths = make_project(git_repo)
+    task = write_task(paths)
+    monkeypatch.setattr(session_mod.time, "monotonic", lambda: 1000.0)
+    monkeypatch.setattr(session_mod, "Popen",
+                        lambda argv, **kw: type("P", (), {"poll": lambda s: None})())
+    rs = spawn_session(task, Config(task_timeout_seconds=1800), paths)
+    assert rs.deadline == 1000.0 + 1800
+
+
+def test_deadline_separate_from_wall_clock(git_repo, monkeypatch, stub_pgid):
+    """A wall-clock jump shifts the display-only `started`, NOT the monotonic deadline."""
+    paths = make_project(git_repo)
+    task = write_task(paths)
+    monkeypatch.setattr(session_mod.time, "monotonic", lambda: 500.0)
+
+    class Frozen(session_mod.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return session_mod.datetime(2999, 1, 1, tzinfo=tz)
+
+    monkeypatch.setattr(session_mod, "datetime", Frozen)
+    monkeypatch.setattr(session_mod, "Popen",
+                        lambda argv, **kw: type("P", (), {"poll": lambda s: None})())
+    rs = spawn_session(task, Config(task_timeout_seconds=60), paths)
+    assert rs.deadline == 500.0 + 60                      # from monotonic
+    meta = json.loads((rs.sdir / "meta.json").read_text())
+    assert meta["started"].startswith("2999")            # wall clock is display-only
 
 
 def test_spawn_conflicting_dependency_blocks_with_dep_named(git_repo, diverging_dep):

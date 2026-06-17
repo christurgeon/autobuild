@@ -35,6 +35,9 @@ class Config:
     session_max_turns: int = 40  # --max-turns; int >= 1
     dangerously_bypass_permissions: bool = True  # => --dangerously-skip-permissions ...
     require_sandbox_for_bypass: bool = False  # ... and do NOT require AUTOBUILD_SANDBOX
+    # --- per-session timeout plumbing (task-104) -----------------------------
+    task_timeout_seconds: int = 1800  # int >= 1; monotonic per-session deadline
+    kill_grace_seconds: int = 10      # int >= 1; SIGTERM -> wait -> SIGKILL (used in 105)
 
 
 # Top-level keys autobuild understands. Anything else is a likely typo and warned.
@@ -188,6 +191,8 @@ def load_config(path: Path) -> Config:
         "dangerously_bypass_permissions", defaults.dangerously_bypass_permissions)
     require_sandbox_for_bypass = want_bool(
         "require_sandbox_for_bypass", defaults.require_sandbox_for_bypass)
+    task_timeout_seconds = want_int("task_timeout_seconds", defaults.task_timeout_seconds)
+    kill_grace_seconds = want_int("kill_grace_seconds", defaults.kill_grace_seconds)
 
     if problems:
         raise ConfigError(problems, path)
@@ -206,4 +211,6 @@ def load_config(path: Path) -> Config:
         session_max_turns=session_max_turns,
         dangerously_bypass_permissions=dangerously_bypass_permissions,
         require_sandbox_for_bypass=require_sandbox_for_bypass,
+        task_timeout_seconds=task_timeout_seconds,
+        kill_grace_seconds=kill_grace_seconds,
     )
