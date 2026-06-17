@@ -132,8 +132,7 @@ uv run pytest            # run the full suite (unit + a token-free e2e loop)
 
 The e2e tests drive the whole loop with a stub `claude` on `PATH` (see
 `tests/fixtures/claude`) — no tokens spent — and assert tasks run in dependency
-order. Design notes and the porting decisions live in
-`docs/superpowers/plans/2026-06-16-python-port.md`.
+order.
 
 ## Limitations
 
