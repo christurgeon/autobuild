@@ -826,3 +826,16 @@ def test_run_settles_with_parked_timeout_task(git_repo):
     add_task(paths, "task-001", status="timeout")
     loop_mod.run(paths, Config(integration="branch"), sleep_seconds=0)  # must return
     assert read_task(paths.tasks_dir / "task-001.md").status == "timeout"
+
+
+# ---- task-105: deadline-bounded wait ---------------------------------------
+
+def test_next_wait_caps_at_nearest_deadline():
+    rs = RunningSession("s", "t", None, None, None, None, deadline=100.0)
+    assert loop_mod._next_wait([rs], sleep_seconds=2.0, now=99.5) == 0.5   # bounded
+    assert loop_mod._next_wait([rs], sleep_seconds=2.0, now=101.0) == 0.0  # never negative
+
+
+def test_next_wait_uses_sleep_when_no_deadlines():
+    rs = RunningSession("s", "t", None, None, None, None, deadline=None)
+    assert loop_mod._next_wait([rs], sleep_seconds=2.0, now=0.0) == 2.0

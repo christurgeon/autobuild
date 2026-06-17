@@ -470,14 +470,27 @@ def _harvest(running: list[RunningSession], config: Config, paths: Paths) -> lis
     return survivors
 
 
-def _wait_any(running: list[RunningSession], timeout: float) -> None:
+def _next_wait(running: list[RunningSession], sleep_seconds: float, now: float) -> float:
+    """How long to sleep before the next harvest: the poll interval, but never past the
+    nearest session deadline (so an over-deadline session is killed promptly), and never
+    negative."""
+    deadlines = [rs.deadline for rs in running if rs.deadline is not None]
+    if not deadlines:
+        return sleep_seconds
+    return max(0.0, min(sleep_seconds, min(deadlines) - now))
+
+
+def _wait_until_next_event(running: list[RunningSession], sleep_seconds: float) -> None:
+    """Block until the next deadline-bounded poll tick, waking early if a child exits.
+    Invariant: every entry in `running` has a live `proc` (proc-less handles are reaped/
+    blocked by `_harvest` before we get here), so this never tight-spins on `wait == 0`."""
+    wait = _next_wait(running, sleep_seconds, time.monotonic())
     for rs in running:
         if rs.proc is not None:
-            try:
-                rs.proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                pass
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                rs.proc.wait(timeout=wait)
             return
+    time.sleep(wait)
 
 
 def run(paths: Paths, config: Config, *, sleep_seconds: float = 2.0) -> None:
@@ -538,7 +551,7 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float) -> None:
             # No new work to start this pass (at capacity, or nothing runnable yet).
             # Block until a running session finishes rather than busy-spinning. If a
             # reap had unblocked a task, claim_tasks above would have claimed it.
-            _wait_any(running, timeout=sleep_seconds)
+            _wait_until_next_event(running, sleep_seconds)
 
     status(paths, config)
 
