@@ -61,8 +61,13 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
     never a half-written sentinel."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        # On success os.replace already consumed tmp; on any failure (write or swap)
+        # drop the scratch file so a failed write never leaks a stray .tmp.
+        tmp.unlink(missing_ok=True)
 
 
 def _result_is_parseable(sdir: Path) -> bool:

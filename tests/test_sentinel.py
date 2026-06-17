@@ -146,6 +146,22 @@ def test_atomic_overwrite_reader_sees_old_complete_never_partial(git_repo, monke
     assert json.loads((sdir / "result.json").read_text())["summary"] == "v2"
 
 
+def test_atomic_write_cleans_up_temp_on_replace_failure(git_repo, monkeypatch):
+    """If os.replace fails after the temp is written, the swap is reported as a failure
+    AND no temp file is left behind — the atomic write never leaks scratch files."""
+    paths = setup(git_repo)
+    sdir = make_sdir(paths)
+
+    def boom(src, dst):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(session_mod.os, "replace", boom)
+    with pytest.raises(OSError):
+        write_sentinel(sdir, "task-001", "BLOCKED", "x")
+    assert not (sdir / "result.json").exists()        # the write did not land
+    assert [p for p in sdir.iterdir() if p.name.endswith(".tmp")] == []  # no residue
+
+
 def test_write_sentinel_if_absent_is_atomic(git_repo, monkeypatch):
     paths = setup(git_repo)
     sdir = make_sdir(paths)
