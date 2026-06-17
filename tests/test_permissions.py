@@ -149,7 +149,7 @@ def test_require_sandbox_false_allows_bypass_without_env(tmp_path):
 
 # ---- hostile target .claude/ ------------------------------------------------
 
-def test_hostile_claude_repo_gets_neutralization_flags(git_repo, monkeypatch):
+def test_hostile_claude_repo_gets_neutralization_flags(git_repo, monkeypatch, stub_pgid):
     """A cloned repo shipping .claude/ hooks: the harness emits --strict-mcp-config and a
     .claude/** deny so the agent can't extend them. (The real containment is the sandbox
     VM; the test stub never executes hooks, so this asserts the harness's contribution.)"""
@@ -189,7 +189,7 @@ def test_spawn_refuses_bypass_without_sandbox(git_repo):
     assert not (paths.worktrees_dir / rs.sid).exists()  # refused before making a worktree
 
 
-def test_spawn_with_sandbox_passes_bypass_flag(git_repo, monkeypatch):
+def test_spawn_with_sandbox_passes_bypass_flag(git_repo, monkeypatch, stub_pgid):
     paths = make_project(git_repo)
     task = write_task(paths)
     monkeypatch.setenv("AUTOBUILD_SANDBOX", "1")

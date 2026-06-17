@@ -27,6 +27,8 @@ class RunningSession:
     worktree: Path | None
     task: Task
     proc: Popen | None
+    pgid: int | None = None
+    deadline: float | None = None  # monotonic; set in spawn_session for a launched child
 
     @property
     def result_file(self) -> Path:
@@ -135,6 +137,17 @@ def _warn(msg: str) -> None:
     print(f"\033[1;33m[warn]\033[0m {msg}", file=sys.stderr)
 
 
+def _process_group_id(proc: Popen) -> int | None:
+    """The child's process-group id. With start_new_session=True the child is its own
+    group leader, so this equals proc.pid. Returns None if the child has already exited
+    (ProcessLookupError/ESRCH — even an unreaped zombie raises it): there is no live
+    group to record or kill."""
+    try:
+        return os.getpgid(proc.pid)
+    except ProcessLookupError:
+        return None
+
+
 def _allowed_tools(config: Config) -> list[str]:
     """The --allowedTools list: the configured base tools, plus Bash(git:*) for commits,
     plus one Bash(<check>:*) per checks entry so the implement phase's checks can run.
@@ -237,7 +250,9 @@ def spawn_session(task: Task, config: Config, paths: Paths) -> RunningSession:
                                  "worktree creation failed; check base_branch in config.yml")
         return RunningSession(sid, tid, sdir, None, task, None)
 
-    (sdir / "meta.json").write_text(json.dumps({
+    # The base meta.json is written (atomically) BEFORE the spawn so an in-progress
+    # session always has a meta for crash recovery; pgid is added once the child exists.
+    meta = {
         "session": sid,
         "task": tid,
         "task_file": str(task.path),
@@ -245,7 +260,8 @@ def spawn_session(task: Task, config: Config, paths: Paths) -> RunningSession:
         "branch": branch_name(tid),
         "status": "in-progress",
         "started": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }, indent=2), encoding="utf-8")
+    }
+    _atomic_write_json(sdir / "meta.json", meta)
     set_status(task.path, "in-progress")
 
     prompt = build_prompt(str(sdir), str(task.path), str(wt), tid)
@@ -254,7 +270,7 @@ def spawn_session(task: Task, config: Config, paths: Paths) -> RunningSession:
     try:
         proc = Popen(
             [config.claude_cmd, "-p", prompt, "--model", config.model, *flags],
-            cwd=str(wt), stdout=out, stderr=err,
+            cwd=str(wt), stdout=out, stderr=err, start_new_session=True,
         )
     except FileNotFoundError:
         out.close()
@@ -265,4 +281,13 @@ def spawn_session(task: Task, config: Config, paths: Paths) -> RunningSession:
                                  f"claude CLI '{config.claude_cmd}' not found on PATH; cannot run session")
         return RunningSession(sid, tid, sdir, wt, task, None)
 
-    return RunningSession(sid, tid, sdir, wt, task, proc)
+    # The child is now live: from here on, never return without its handle — a lost
+    # RunningSession would orphan a running process the loop can't reap or kill.
+    pgid: int | None = None
+    try:
+        pgid = _process_group_id(proc)
+        meta["pgid"] = pgid
+        _atomic_write_json(sdir / "meta.json", meta)
+    except OSError as exc:
+        _warn(f"session {sid}: could not finalize pgid/meta ({exc}); session still tracked")
+    return RunningSession(sid, tid, sdir, wt, task, proc, pgid=pgid)

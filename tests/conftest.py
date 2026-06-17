@@ -93,3 +93,13 @@ def stub_bin(tmp_path, monkeypatch):
             monkeypatch.setenv(k, str(v))
 
     return set_mode
+
+
+@pytest.fixture
+def stub_pgid(monkeypatch):
+    """Stub _process_group_id for tests that fake Popen (there's no real child to
+    query). Returns a fixed sentinel so meta['pgid'] is deterministic and no real
+    os.getpgid runs (which would otherwise resolve the test-runner's own group)."""
+    from autobuild import session as session_mod
+    monkeypatch.setattr(session_mod, "_process_group_id", lambda proc: 4242)
+    return 4242
