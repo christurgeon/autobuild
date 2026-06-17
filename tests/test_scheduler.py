@@ -175,3 +175,22 @@ def test_concurrent_claims_never_double_claim(tmp_path):
     assert sorted(got) == [f"task-{i:03d}" for i in range(1, 9)]  # all 8, no dup
     assert len(got) == len(set(got))
     assert all(t.status == "claimed" for t in iter_tasks(paths.tasks_dir))
+
+
+# ---- task-105: timeout is a non-terminal dead end until retry (106) ---------
+
+def test_timeout_task_reported_stuck(tmp_path):
+    from autobuild.scheduler import stuck_tasks
+    from autobuild.tasks import Task
+    t = Task("task-001", "t", "timeout", 1, [], tmp_path / "task-001.md")
+    assert stuck_tasks([t], {"task-001": t})["task-001"].startswith("timed-out")
+
+
+def test_dependent_of_timeout_reported(tmp_path):
+    from autobuild.scheduler import stuck_tasks
+    from autobuild.tasks import Task
+    dep = Task("task-001", "d", "timeout", 1, [], tmp_path / "a.md")
+    dependent = Task("task-002", "x", "todo", 1, ["task-001"], tmp_path / "b.md")
+    idx = {"task-001": dep, "task-002": dependent}
+    stuck = stuck_tasks([dep, dependent], idx)
+    assert "timed-out-dependency: task-001" in stuck["task-002"]

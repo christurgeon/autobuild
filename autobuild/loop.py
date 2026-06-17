@@ -14,6 +14,8 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import os
+import signal
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -280,6 +282,12 @@ def reap_session(sdir: Path, config: Config, paths: Paths) -> bool:
         if task:
             set_status(task.path, "blocked")
         warn(f"{sid}: {tid} NEEDS_HUMAN — see {sdir / 'result.json'}")
+    elif status == "TIMEOUT":
+        # A killed-past-deadline session: a distinct, retryable status. NEVER integrated
+        # or verified (its tree is incomplete), and no follow-ups filed. Retry lands in 106.
+        if task:
+            set_status(task.path, "timeout")
+        warn(f"{sid}: {tid} TIMEOUT — killed past deadline (retry pending in a later task)")
     else:
         warn(f"{sid}: unrecognized status '{status}'")
         return False
@@ -301,6 +309,36 @@ def reap_all(config: Config, paths: Paths) -> int:
         if sdir.is_dir() and reap_session(sdir, config, paths):
             n += 1
     return n
+
+
+def _signal_session(rs: RunningSession, sig: int) -> None:
+    """Signal the session's whole process group (preferred) or the child directly.
+    ESRCH — the group/child already exited — is suppressed so one dead session never
+    aborts the harvest of the others."""
+    with contextlib.suppress(ProcessLookupError):
+        if rs.pgid is not None:
+            os.killpg(rs.pgid, sig)
+        elif rs.proc is not None:
+            rs.proc.send_signal(sig)
+
+
+def _kill_group(rs: RunningSession, grace: float) -> None:
+    """Terminate a session and reap its child. If already exited, just reap. Otherwise
+    SIGTERM -> wait(grace) -> SIGKILL -> wait(), leaving no zombie."""
+    proc = rs.proc
+    if proc is None:
+        return
+    if proc.poll() is not None:
+        return  # already exited: poll() reaped it
+    _signal_session(rs, signal.SIGTERM)
+    try:
+        proc.wait(timeout=grace)
+        return  # exited within grace -> reaped
+    except subprocess.TimeoutExpired:
+        pass
+    _signal_session(rs, signal.SIGKILL)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=grace)  # reap the zombie
 
 
 def reap_stalled(running: list[RunningSession], paths: Paths) -> None:
@@ -392,17 +430,34 @@ def _harvest(running: list[RunningSession], config: Config, paths: Paths) -> lis
     dropped, leaving a valid result.json unreaped (task stuck in-progress forever).
     """
     survivors: list[RunningSession] = []
+    # Snapshot `now` once: a kill can block up to `grace`, so a session that crosses its
+    # deadline DURING an earlier kill is caught on the next pass — fine, deadlines (>=1800s)
+    # are coarse vs grace (<=10s). Deliberate; do not recompute per session.
+    now = time.monotonic()
     for rs in running:
         kind = _classify_sentinel(rs.sdir)
         if kind == "reapable":
-            continue  # valid sentinel — reap_all handles it (even if still alive,
-            #            so a session that writes its result then lingers can't hang)
+            continue  # (1) a valid sentinel beats everything (even the deadline) — reap_all
+            #             handles it (even if still alive, so a session that writes its
+            #             result then lingers can't hang)
         if rs.alive():
-            survivors.append(rs)  # no usable result yet, still running — let it finish
+            if rs.deadline is not None and now >= rs.deadline:
+                # (3) past deadline, still running, no usable result — kill, then
+                # RE-CLASSIFY: a result written during the grace window must still win.
+                warn(f"{rs.sid} exceeded its deadline; killing {rs.tid}")
+                _kill_group(rs, config.kill_grace_seconds)
+                if _classify_sentinel(rs.sdir) == "reapable":
+                    continue  # finished during grace — reap_all takes the COMPLETE
+                write_sentinel_if_absent(
+                    rs.sdir, rs.tid, "TIMEOUT",
+                    f"session exceeded task_timeout_seconds "
+                    f"({config.task_timeout_seconds}s) and was killed")
+                continue
+            survivors.append(rs)  # (4) within deadline, still running — let it finish
             #                       (an absent or torn/mid-write sentinel under a live
             #                       process is never BLOCKED)
             continue
-        # Process exited without a usable result — BLOCK it (never silently drop).
+        # (2) Process exited without a usable result — BLOCK it (never silently drop).
         if kind == "corrupt":
             warn(f"{rs.sid} exited with an unparseable result.json; marking {rs.tid} BLOCKED")
             write_sentinel_if_absent(rs.sdir, rs.tid, "BLOCKED",
@@ -415,14 +470,27 @@ def _harvest(running: list[RunningSession], config: Config, paths: Paths) -> lis
     return survivors
 
 
-def _wait_any(running: list[RunningSession], timeout: float) -> None:
+def _next_wait(running: list[RunningSession], sleep_seconds: float, now: float) -> float:
+    """How long to sleep before the next harvest: the poll interval, but never past the
+    nearest session deadline (so an over-deadline session is killed promptly), and never
+    negative."""
+    deadlines = [rs.deadline for rs in running if rs.deadline is not None]
+    if not deadlines:
+        return sleep_seconds
+    return max(0.0, min(sleep_seconds, min(deadlines) - now))
+
+
+def _wait_until_next_event(running: list[RunningSession], sleep_seconds: float) -> None:
+    """Block until the next deadline-bounded poll tick, waking early if a child exits.
+    Invariant: every entry in `running` has a live `proc` (proc-less handles are reaped/
+    blocked by `_harvest` before we get here), so this never tight-spins on `wait == 0`."""
+    wait = _next_wait(running, sleep_seconds, time.monotonic())
     for rs in running:
         if rs.proc is not None:
-            try:
-                rs.proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                pass
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                rs.proc.wait(timeout=wait)
             return
+    time.sleep(wait)
 
 
 def run(paths: Paths, config: Config, *, sleep_seconds: float = 2.0) -> None:
@@ -483,7 +551,7 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float) -> None:
             # No new work to start this pass (at capacity, or nothing runnable yet).
             # Block until a running session finishes rather than busy-spinning. If a
             # reap had unblocked a task, claim_tasks above would have claimed it.
-            _wait_any(running, timeout=sleep_seconds)
+            _wait_until_next_event(running, sleep_seconds)
 
     status(paths, config)
 

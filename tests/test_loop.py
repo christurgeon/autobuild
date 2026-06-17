@@ -1,4 +1,7 @@
 import json
+import os
+import signal
+import time
 
 import pytest
 
@@ -14,9 +17,29 @@ from autobuild.loop import (
     status,
 )
 from autobuild.paths import Paths
-from autobuild.session import RunningSession
+from autobuild.session import RunningSession, spawn_session
 from autobuild.tasks import read_task
 from autobuild.worktree import make_worktree
+
+
+def _spawn_real(paths, stub_bin, tid="task-001", **env):
+    """Spawn one real session through spawn_session (stub on PATH); return the handle."""
+    stub_bin(**env)
+    add_task(paths, tid, status="todo")
+    task = read_task(paths.tasks_dir / f"{tid}.md")
+    return spawn_session(task, Config(claude_cmd="claude", task_timeout_seconds=1800,
+                                      kill_grace_seconds=1), paths)
+
+
+def _await_ready(sdir, timeout=5.0):
+    """Block until a STUB_SLEEP child has installed its signal handlers (it touches
+    <sdir>/stub-ready), so a kill in the test can't race the handler install."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if (sdir / "stub-ready").exists():
+            return
+        time.sleep(0.01)
+    raise AssertionError("stub never signaled ready")
 
 
 def setup(repo):
@@ -673,3 +696,146 @@ def test_harvest_block_path_refuses_to_clobber_late_valid_result(git_repo):
     loop_mod._harvest([rs], Config(integration="branch"), paths)
     # the real COMPLETE result is reaped, not overwritten by a BLOCKED sentinel
     assert read_task(paths.tasks_dir / "task-001.md").status == "done"
+
+
+# ---- task-105: _kill_group + signal handling -------------------------------
+
+def test_kill_group_reaps_running_child(git_repo, stub_bin):
+    paths = setup(git_repo)
+    rs = _spawn_real(paths, stub_bin, STUB_SLEEP="30", STUB_IGNORE_SIGTERM="1")
+    _await_ready(rs.sdir)                          # SIG_IGN installed -> kill exercises SIGKILL
+    assert rs.proc.poll() is None                 # alive
+    loop_mod._kill_group(rs, grace=1)
+    assert rs.proc.poll() is not None             # killed + reaped, no zombie
+
+
+def test_kill_group_already_exited_is_noop(git_repo, stub_bin):
+    paths = setup(git_repo)
+    rs = _spawn_real(paths, stub_bin)             # normal stub exits immediately
+    rs.proc.wait()
+    loop_mod._kill_group(rs, grace=1)             # must not raise (ESRCH-safe)
+    assert rs.proc.poll() is not None
+
+
+def test_signal_session_esrch_suppressed(monkeypatch):
+    def raise_esrch(pgid, sig):
+        raise ProcessLookupError
+    monkeypatch.setattr(loop_mod.os, "killpg", raise_esrch)
+    rs = RunningSession("s", "task-001", None, None, None, None, pgid=12345)
+    loop_mod._signal_session(rs, signal.SIGTERM)  # ProcessLookupError suppressed -> no raise
+
+
+# ---- task-105: harvest deadline ordering + TIMEOUT + timeout status ---------
+
+def test_reapable_beats_deadline(git_repo):
+    """A valid result present at harvest time is reaped COMPLETE even past deadline;
+    never killed/overwritten by TIMEOUT."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    sdir = make_session(paths, "task-001", "COMPLETE")          # result already on disk
+    rs = RunningSession("sess-task-001", "task-001", sdir,
+                        paths.worktrees_dir / "sess-task-001", None, _Alive(),
+                        pgid=None, deadline=time.monotonic() - 5)  # past deadline
+    survivors = loop_mod._harvest([rs], Config(integration="branch"), paths)
+    assert survivors == []
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"
+
+
+def test_finish_during_grace_beats_timeout(git_repo, stub_bin):
+    """Child ignores SIGTERM and writes COMPLETE on it; after kill, re-classify sees the
+    result -> reaped COMPLETE, no TIMEOUT."""
+    paths = setup(git_repo)
+    rs = _spawn_real(paths, stub_bin, STUB_SLEEP="30", STUB_COMPLETE_ON_SIGTERM="1")
+    _await_ready(rs.sdir)                                       # handler installed first
+    rs.deadline = time.monotonic() - 1                          # already past deadline
+    survivors = loop_mod._harvest([rs], Config(integration="branch",
+                                               kill_grace_seconds=5), paths)
+    assert survivors == []
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"
+
+
+def test_hung_past_deadline_times_out(git_repo, stub_bin):
+    """Child ignores SIGTERM, never writes -> SIGKILL -> TIMEOUT sentinel; task `timeout`,
+    not blocked/done; no zombie."""
+    paths = setup(git_repo)
+    rs = _spawn_real(paths, stub_bin, STUB_SLEEP="30", STUB_IGNORE_SIGTERM="1")
+    _await_ready(rs.sdir)
+    rs.deadline = time.monotonic() - 1
+    survivors = loop_mod._harvest([rs], Config(integration="branch",
+                                               kill_grace_seconds=1), paths)
+    assert survivors == []
+    assert rs.proc.poll() is not None                          # reaped, no zombie
+    assert read_task(paths.tasks_dir / "task-001.md").status == "timeout"
+
+
+def test_timeout_never_integrates(git_repo, git):
+    """A TIMEOUT sentinel is never integrated/verified even with a real branch+commit."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    wt = make_worktree(paths, "sess-task-001", "task-001", "main")
+    (wt / "f.txt").write_text("x")
+    git(wt, "add", "-A")
+    git(wt, "commit", "-q", "-m", "w")
+    sdir = paths.sessions_dir / "sess-task-001"
+    sdir.mkdir(parents=True, exist_ok=True)
+    (sdir / "meta.json").write_text(json.dumps({"task": "task-001",
+                                                "branch": "autobuild/task-001"}))
+    (sdir / "result.json").write_text(json.dumps({"task": "task-001", "status": "TIMEOUT",
+                                                  "summary": "killed"}))
+    assert reap_session(sdir, Config(integration="auto-merge"), paths) is True
+    assert "w" not in git(git_repo, "log", "--oneline", "main").stdout   # NOT merged
+    assert read_task(paths.tasks_dir / "task-001.md").status == "timeout"
+    assert json.loads((sdir / "reaped.json").read_text())["status"] == "TIMEOUT"
+
+
+def test_timeout_reap_is_idempotent(git_repo):
+    """Second reap over a TIMEOUT'd session is a no-op (reaped.json guard)."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    sdir = make_session(paths, "task-001", "TIMEOUT")
+    assert reap_session(sdir, Config(integration="branch"), paths) is True
+    assert reap_session(sdir, Config(integration="branch"), paths) is False
+    assert read_task(paths.tasks_dir / "task-001.md").status == "timeout"
+
+
+def test_one_dead_group_does_not_abort_harvest_of_others(git_repo):
+    """A first session whose group is already dead must not strand a second session's
+    harvest: the first is exited-without-result (-> BLOCKED), the second has a valid
+    result (-> reaped done); both processed in one _harvest pass."""
+    paths = setup(git_repo)
+    s1 = paths.sessions_dir / "sess-a"
+    s1.mkdir(parents=True)
+    (s1 / "meta.json").write_text(json.dumps({"task": "task-001", "branch": "autobuild/task-001"}))
+    add_task(paths, "task-001")
+    rs1 = RunningSession("sess-a", "task-001", s1, paths.worktrees_dir / "sess-a", None,
+                         _Exited(1), pgid=12345)            # group already gone
+    add_task(paths, "task-002")
+    s2 = make_session(paths, "task-002", "COMPLETE")
+    rs2 = RunningSession("sess-task-002", "task-002", s2,
+                         paths.worktrees_dir / "sess-task-002", None, _Exited(0))
+    survivors = loop_mod._harvest([rs1, rs2], Config(integration="branch"), paths)
+    assert survivors == []
+    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+    assert read_task(paths.tasks_dir / "task-002.md").status == "done"
+
+
+def test_run_settles_with_parked_timeout_task(git_repo):
+    """A parked `timeout` task (non-terminal, not todo) must let the loop settle, not
+    spin to max_iterations."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="timeout")
+    loop_mod.run(paths, Config(integration="branch"), sleep_seconds=0)  # must return
+    assert read_task(paths.tasks_dir / "task-001.md").status == "timeout"
+
+
+# ---- task-105: deadline-bounded wait ---------------------------------------
+
+def test_next_wait_caps_at_nearest_deadline():
+    rs = RunningSession("s", "t", None, None, None, None, deadline=100.0)
+    assert loop_mod._next_wait([rs], sleep_seconds=2.0, now=99.5) == 0.5   # bounded
+    assert loop_mod._next_wait([rs], sleep_seconds=2.0, now=101.0) == 0.0  # never negative
+
+
+def test_next_wait_uses_sleep_when_no_deadlines():
+    rs = RunningSession("s", "t", None, None, None, None, deadline=None)
+    assert loop_mod._next_wait([rs], sleep_seconds=2.0, now=0.0) == 2.0

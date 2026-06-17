@@ -6,6 +6,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from collections.abc import Sequence
+from contextlib import suppress
 from pathlib import Path
 
 from .paths import Paths
@@ -100,13 +101,26 @@ def _merge_dependencies(root: Path, worktree: Path, tid: str,
 
 
 def remove_worktree(paths: Paths, sid: str) -> None:
-    """Detach the worktree, keeping its branch + commits."""
+    """Detach the worktree, keeping its branch + commits. `-f -f` (double-force) removes
+    even a dirty/locked tree (and its admin dir) in one call — the common kill case. If
+    that still fails (broken .git pointer / half-merge a SIGKILL'd agent left behind),
+    fall back: abort any in-progress merge/rebase, clear the lock + stale index lock,
+    rmtree the tree, and prune the now-dangling admin dir."""
     path = paths.worktrees_dir / sid
-    if not path.exists():
+    admin = paths.root / ".git" / "worktrees" / sid
+    if not path.exists() and not admin.exists():
         return
-    r = _git(paths.root, "worktree", "remove", "--force", str(path), check=False)
-    if r.returncode != 0:
-        shutil.rmtree(path, ignore_errors=True)
+    r = _git(paths.root, "worktree", "remove", "--force", "--force", str(path), check=False)
+    if r.returncode == 0:
+        return
+    if path.exists():
+        _git(path, "merge", "--abort", check=False)
+        _git(path, "rebase", "--abort", check=False)
+    for stale in ("locked", "index.lock"):  # `locked` blocks both `remove` AND `prune`
+        with suppress(FileNotFoundError):
+            (admin / stale).unlink()
+    shutil.rmtree(path, ignore_errors=True)
+    _git(paths.root, "worktree", "prune", check=False)
 
 
 def prune_worktrees(paths: Paths) -> None:

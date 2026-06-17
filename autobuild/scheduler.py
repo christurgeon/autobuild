@@ -71,6 +71,9 @@ def stuck_tasks(tasks: list[Task], index: dict[str, Task]) -> dict[str, str]:
             return None
         if task.status == "blocked":
             return f"blocked-dependency: {tid}"
+        if task.status == "timeout":
+            # non-terminal, but cannot reach `done` on its own until retry (task-106)
+            return f"timed-out-dependency: {tid}" if path else "timed-out: awaiting retry"
         path.append(tid)
         try:
             for dep in task.depends_on:
