@@ -81,14 +81,24 @@ Module responsibilities:
   conflict) or `DependencyMergeError` (other failure, e.g. no git identity), aborting first so no
   half-merged tree is left.
 - **`autobuild/session.py`** — `spawn_session`: builds the session dir + worktree + `meta.json`,
-  sets the task `in-progress`, and launches a **fresh `claude -p`** via `subprocess.Popen`. It
-  returns an in-memory `RunningSession` handle the loop supervises with `proc.poll()` — this
-  replaces the bash `.running` PID file.
+  sets the task `in-progress`, and launches a **fresh `claude -p`** in its **own process group**
+  (`start_new_session=True`, so the whole agent subtree can be signalled at once) via
+  `subprocess.Popen`. `_session_flags` builds the **permission posture**: a bypass posture
+  (`dangerously_bypass_permissions`, or `permission_mode: bypassPermissions`) emits
+  `--dangerously-skip-permissions`, but only when the sandbox gate is satisfied — otherwise it
+  raises `BypassNotPermitted` and the spawn is refused; a fenced posture emits `--permission-mode`,
+  an `--allowedTools` allowlist, a `.claude/**` write-deny, and `--strict-mcp-config` (plus
+  `--max-turns` either way). It returns an in-memory `RunningSession` carrying the child's `pgid`
+  (also persisted to `meta.json`) and a **monotonic `deadline`** (`time.monotonic() +
+  task_timeout_seconds`); the loop supervises it with `proc.poll()` plus that deadline — together
+  replacing the bash `.running` PID file.
 - **`autobuild/loop.py`** — the outer Ralph-style loop (`run`, holding a single-supervisor
   `fcntl.flock` on `.autobuild/run.lock`), the reaper (`reap_all` / `reap_session`), session
-  harvesting (`_harvest` / `_classify_sentinel`), `reconcile` (startup crash recovery),
-  `verify_checks`, `integrate`, `file_followups`, `status`, and `clean`. The CLI `reap` maps to
-  `reap` here (a lock-aware wrapper), not `reap_all` directly.
+  harvesting (`_harvest` / `_classify_sentinel`), the **per-session timeout** (deadline-bounded
+  waits via `_next_wait` / `_wait_for_progress`, and `_kill_group` / `_signal_session` —
+  `SIGTERM` → `kill_grace_seconds` → `SIGKILL` over the session's process group), `reconcile`
+  (startup crash recovery), `verify_checks`, `integrate`, `file_followups`, `status`, and
+  `clean`. The CLI `reap` maps to `reap` here (a lock-aware wrapper), not `reap_all` directly.
 - **`autobuild/paths.py`** — the frozen `Paths` dataclass.
 
 ### The session lifecycle / sentinel protocol (the core data flow)
@@ -107,15 +117,20 @@ This is the part that requires reading multiple files to understand:
    fail, blocks the task and keeps the branch instead of integrating (trust, but verify). If they
    pass it **integrates** (`integrate` → `pr` via `gh` / `auto-merge` / `branch`) and only then
    `set_status`es the task `done` — so a failed auto-merge leaves the task `blocked`, not falsely
-   `done`. It files any `followups[]` as new `tasks/*.md` (ids allocated under the backlog lock),
+   `done`. `BLOCKED`/`NEEDS_HUMAN` set the task `blocked`; a synthetic `TIMEOUT` sets it `timeout`
+   (never integrated or verified — its tree is incomplete — and no follow-ups filed). It files any
+   `followups[]` as new `tasks/*.md` (ids allocated under the backlog lock),
    removes the worktree, and drops a `reaped.json` marker. That marker makes the reaper
    **idempotent**: a second pass over the same session is a no-op.
-5. Two safety nets catch sessions that don't end cleanly. In-loop, `_harvest` never drops a
-   session without reaping it: a process that exits with no usable sentinel — absent, or present
-   but unparseable (`_classify_sentinel`) — is given a synthetic `BLOCKED`. At startup `reconcile`
-   (only while it holds the run lock) returns orphaned `claimed` tasks to `todo` and `BLOCKED`s
-   orphaned `in-progress` sessions, so a killed `run` resumes cleanly from files alone (no PID
-   file needed).
+5. Three safety nets catch sessions that don't end cleanly. In-loop, `_harvest` never drops a
+   session without reaping it: a session that **crosses its monotonic deadline** while still
+   running is killed (`_kill_group`) and given a synthetic `TIMEOUT` — unless a `result.json` was
+   written during the grace window, which is re-classified and still wins; a process that exits
+   with no usable sentinel — absent, or present but unparseable (`_classify_sentinel`) — is given
+   a synthetic `BLOCKED`. At startup `reconcile` (only while it holds the run lock) returns
+   orphaned `claimed` tasks to `todo` and `BLOCKED`s orphaned `in-progress` sessions (deadlines
+   are in-memory, so a crashed run's orphans become `BLOCKED`, not `timeout`), so a killed `run`
+   resumes cleanly from files alone (no PID file needed).
 
 The loop terminates when nothing is running **and** nothing is runnable (backlog drained, or
 settled behind blocked/unsatisfiable deps), or when `max_iterations` trips. When a pass makes no
@@ -123,10 +138,14 @@ progress it blocks on the next live session finishing instead of busy-sleeping.
 
 ### Task status state machine
 
-`todo` → `claimed` → `in-progress` → terminal (`done` | `blocked`). `done` and `blocked` are the
-only terminal states (`is_terminal` / the `TERMINAL` set); everything else counts as in-flight,
-which is what keeps the loop running. The full vocabulary lives in the template task file:
-`todo | claimed | in-progress | review | done | blocked`.
+`todo` → `claimed` → `in-progress` → terminal (`done` | `blocked`). A session killed past its
+deadline lands the task in `timeout` — **non-terminal**: it is never integrated or verified and
+awaits a retry (the automatic re-queue is task-106; until then it sits, and a dependent sees a
+`timed-out-dependency` blocker via `stuck_tasks`). `done` and `blocked` remain the only terminal
+states (`is_terminal` / the `TERMINAL` set); everything else (including `timeout`) counts as
+in-flight, which is what keeps the loop running. The template task file documents the human
+vocabulary `todo | claimed | in-progress | review | done | blocked`; the harness also applies
+`timeout`.
 
 ## Conventions and gotchas
 
@@ -149,6 +168,11 @@ which is what keeps the loop running. The full vocabulary lives in the template 
   regex + `os.replace`; never round-trip a human task file through `yaml.dump` (it would strip
   comments and reorder keys). Follow-up task files are generated, so those *are* serialized with
   `yaml.safe_dump`.
+- **Per-session timeouts are monotonic and in-memory.** A session's deadline lives only on its
+  `RunningSession` (`time.monotonic()`-based) and is enforced solely by the live supervisor's
+  `_harvest`; a killed `run` does not resume deadlines — its orphans are caught by `reconcile` as
+  `BLOCKED`, not `timeout`. The child runs in its own process group so `_kill_group` can signal
+  the whole agent subtree (`os.killpg`); the `pgid` is persisted to `meta.json`.
 - Naming: CLI subcommands map to `run` / `status` / `reap` / `clean` in `loop.py` (plus
   `ab_init` in `cli.py`); module-internal helpers are prefixed `_`.
 - Minimal dependencies by design: **PyYAML** is the only runtime dep; everything else (process
@@ -156,5 +180,7 @@ which is what keeps the loop running. The full vocabulary lives in the template 
   that style unless you're deliberately adding a dependency.
 - The core has been hardened by dogfooding autobuild on its own backlog — the run-lock,
   dependency-aware worktree bases, reaper checks-verification, config validation, stuck-dependency
-  surfacing, and the sentinel/termination races those exposed are all in place with tests. Match
+  surfacing, the session **permission posture** (bypass/sandbox gate, fenced allowlist), and
+  **per-session timeouts** (process-group spawn + monotonic deadline + `SIGTERM`/`SIGKILL` kill)
+  are all in place with tests, along with the sentinel/termination races those exposed. Match
   that bar: a real defect plus a regression test beats new scope.

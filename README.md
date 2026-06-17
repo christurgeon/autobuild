@@ -38,8 +38,9 @@ Claude session in its own git worktree** → the session plans, self-reviews, im
 runs checks, commits, and writes a `result.json` sentinel → the **reaper**
 re-runs the configured `checks` against that worktree itself (trust, but verify) and,
 only if they pass, marks the task `done` (opening a PR or auto-merging per config);
-a failed check or a `BLOCKED` sentinel leaves the branch and blocks the task → repeat
-until the backlog is drained or a stop condition trips.
+a failed check or a `BLOCKED` sentinel leaves the branch and blocks the task, and a session that
+blows its `task_timeout_seconds` deadline has its whole process group killed and its task marked
+`timeout` for later retry → repeat until the backlog is drained or a stop condition trips.
 
 ## Quick start
 
