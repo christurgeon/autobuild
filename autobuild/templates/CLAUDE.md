@@ -44,6 +44,15 @@ Always end by writing `<session-dir>/result.json`:
 }
 ```
 
+**Write it atomically.** The reaper may read `result.json` at any moment, so never
+write it in place — a half-written file looks corrupt and blocks your task. Write the
+full JSON to a temp file in the session dir, then rename it over `result.json` (an
+atomic replace on the same filesystem):
+
+```bash
+printf '%s' "$JSON" > <session-dir>/result.json.tmp && mv -f <session-dir>/result.json.tmp <session-dir>/result.json
+```
+
 - **COMPLETE** — task done, checks pass, work committed. The reaper re-runs the
   `checks` against your worktree before integrating, so do **not** write COMPLETE on a
   tree where they fail — it will be overridden to `blocked` and left unmerged.

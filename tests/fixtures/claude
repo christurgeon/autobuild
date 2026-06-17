@@ -52,10 +52,15 @@ def main():
 
     if sdir:
         os.makedirs(sdir, exist_ok=True)
-        with open(os.path.join(sdir, "result.json"), "w") as fh:
-            json.dump({"task": tid, "status": status,
-                       "summary": f"stub {status} for {tid}",
-                       "commit": commit_sha, "followups": followups}, fh)
+        # Write atomically (temp + os.replace), mirroring the CLAUDE.md contract, so the
+        # reaper never observes a torn result.json.
+        payload = json.dumps({"task": tid, "status": status,
+                              "summary": f"stub {status} for {tid}",
+                              "commit": commit_sha, "followups": followups})
+        tmp = os.path.join(sdir, "result.json.tmp")
+        with open(tmp, "w") as fh:
+            fh.write(payload)
+        os.replace(tmp, os.path.join(sdir, "result.json"))
     return 0
 
 
