@@ -621,3 +621,55 @@ def test_status_omits_stuck_section_when_none(git_repo, capsys):
     add_task(paths, "task-001", status="todo")
     status(paths, Config(integration="branch"))
     assert "STUCK" not in capsys.readouterr().out
+
+
+# ---- task-101: harness BLOCK paths are atomic and don't clobber a real result -
+
+def test_reap_stalled_block_write_is_atomic_no_temp_residue(git_repo):
+    """The rerouted BLOCK write still produces a sentinel and leaves no partial temp."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    sid = "sess-task-001"
+    sdir = paths.sessions_dir / sid
+    sdir.mkdir(parents=True)
+    rs = RunningSession(sid, "task-001", sdir, paths.worktrees_dir / sid, None, _Exited(1))
+    reap_stalled([rs], paths)
+    assert json.loads((sdir / "result.json").read_text())["status"] == "BLOCKED"
+    assert [p for p in sdir.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_harvest_block_write_is_atomic_no_temp_residue(git_repo):
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    sid = "sess-task-001"
+    sdir = paths.sessions_dir / sid
+    sdir.mkdir(parents=True)
+    (sdir / "meta.json").write_text(json.dumps({"task": "task-001", "branch": "autobuild/task-001"}))
+    rs = RunningSession(sid, "task-001", sdir, paths.worktrees_dir / sid, None, _Exited(1))
+    loop_mod._harvest([rs], Config(integration="branch"), paths)
+    assert json.loads((sdir / "result.json").read_text())["status"] == "BLOCKED"
+    assert [p for p in sdir.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_reconcile_block_write_is_atomic_no_temp_residue(git_repo):
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    sdir = paths.sessions_dir / "sess-task-001"
+    sdir.mkdir(parents=True)
+    (sdir / "meta.json").write_text(json.dumps({"task": "task-001", "branch": "autobuild/task-001"}))
+    reconcile(paths, sweep_in_progress=True)
+    assert json.loads((sdir / "result.json").read_text())["status"] == "BLOCKED"
+    assert [p for p in sdir.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_harvest_block_path_refuses_to_clobber_late_valid_result(git_repo):
+    """Belt-and-suspenders: even if a valid result lands in the BLOCK window, the
+    guarded write refuses to overwrite it (the data-loss task-101 closes)."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    sid = "sess-task-001"
+    sdir = make_session(paths, "task-001", "COMPLETE", summary="real result")
+    rs = RunningSession(sid, "task-001", sdir, paths.worktrees_dir / sid, None, _Exited(0))
+    loop_mod._harvest([rs], Config(integration="branch"), paths)
+    # the real COMPLETE result is reaped, not overwritten by a BLOCKED sentinel
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"
