@@ -99,6 +99,8 @@ require_sandbox_for_bypass: false     # ... with no AUTOBUILD_SANDBOX gate (see 
 permission_mode: acceptEdits  # used only when bypass is OFF: plan|default|acceptEdits|bypassPermissions
 allowed_tools: [Edit, Write, Read]   # (fenced mode) + Bash(git:*) and one Bash(<check>:*) per check
 session_max_turns: 40         # --max-turns cap per session (int >= 1)
+task_timeout_seconds: 1800    # per-session wall budget, monotonic (int >= 1)
+kill_grace_seconds: 10        # SIGTERM -> wait -> SIGKILL grace (int >= 1)
 ```
 
 ## Security posture (read before running unattended)

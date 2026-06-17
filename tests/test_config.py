@@ -285,6 +285,33 @@ def test_aggregates_permission_problems_into_one_error(tmp_path):
     assert "allowed_tools" in joined
 
 
+# --- task-104: per-session timeout keys -------------------------------------
+
+def test_timeout_defaults(tmp_path):
+    cfg = load_config(tmp_path / "nope.yml")
+    assert cfg.task_timeout_seconds == 1800
+    assert cfg.kill_grace_seconds == 10
+
+
+def test_task_timeout_seconds_zero_raises(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, "task_timeout_seconds: 0\n"))
+    assert "task_timeout_seconds" in str(e.value)
+
+
+def test_kill_grace_seconds_zero_raises(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, "kill_grace_seconds: 0\n"))
+    assert "kill_grace_seconds" in str(e.value)
+
+
+def test_timeout_keys_aggregate(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, "task_timeout_seconds: 0\nkill_grace_seconds: -1\n"))
+    joined = "\n".join(e.value.problems)
+    assert "task_timeout_seconds" in joined and "kill_grace_seconds" in joined
+
+
 def test_config_error_names_path(tmp_path):
     p = _write(tmp_path, "integration: nope\n")
     with pytest.raises(ConfigError) as e:
