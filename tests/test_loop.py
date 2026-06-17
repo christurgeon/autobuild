@@ -880,3 +880,18 @@ def test_run_survives_poisoned_sentinel(git_repo):
     sdir.mkdir(parents=True)
     (sdir / "result.json").write_text('["x"]')
     loop_mod.run(paths, Config(integration="branch"), sleep_seconds=0)  # must return, not crash
+
+
+# ---- audit I-4: pr mode must not mark done when push fails ------------------
+
+def test_pr_mode_push_failure_blocks_not_done(git_repo, monkeypatch):
+    """pr mode must NOT mark a task done when the push fails (no remote/auth): there's no
+    reviewable PR, so it needs a human, not a false `done`."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    make_worktree(paths, "sess-task-001", "task-001", "main")
+    make_session(paths, "task-001", "COMPLETE")
+    monkeypatch.setattr(loop_mod, "which", lambda name: "/usr/bin/gh")   # pretend gh present
+    # git_repo has no 'origin' remote -> push fails before gh is even invoked
+    reap_session(paths.sessions_dir / "sess-task-001", Config(integration="pr"), paths)
+    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"

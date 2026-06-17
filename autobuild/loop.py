@@ -147,17 +147,25 @@ def integrate(tid: str, config: Config, paths: Paths) -> tuple[bool, str]:
         return True, f"left branch {branch} for manual merge"
 
     if mode == "pr":
-        if which("gh"):
-            _git(root, "push", "-u", "origin", branch)
-            r = subprocess.run(
-                ["gh", "pr", "create", "--head", branch, "--base", base,
-                 "--title", f"autobuild: {tid}", "--body", f"Automated by autobuild for {tid}."],
-                cwd=str(root), capture_output=True, text=True,
-            )
-            if r.returncode == 0:
-                return True, f"opened PR for {branch}"
-            return True, f"PR creation failed for {branch}; branch left for manual PR"
-        return True, f"gh not found; left branch {branch} for manual PR"
+        if not which("gh"):
+            return True, f"gh not found; left branch {branch} for manual PR"
+        push = _git(root, "push", "-u", "origin", branch)
+        if push.returncode != 0:
+            # Nothing reached the remote, so there is no reviewable PR and never will be
+            # without intervention — do NOT mark the task done. (Check remote/auth.)
+            tail = (push.stderr or push.stdout or "").strip().splitlines()
+            return False, (f"push failed for {branch}; no PR opened, branch kept locally "
+                           f"(check remote/auth): {tail[-1].strip() if tail else 'git push failed'}")
+        r = subprocess.run(
+            ["gh", "pr", "create", "--head", branch, "--base", base,
+             "--title", f"autobuild: {tid}", "--body", f"Automated by autobuild for {tid}."],
+            cwd=str(root), capture_output=True, text=True,
+        )
+        if r.returncode == 0:
+            return True, f"opened PR for {branch}"
+        # Branch IS pushed (visible on the remote); only the PR-open step failed -> a human
+        # can open it from the pushed branch, so the work landed: done.
+        return True, f"PR creation failed for {branch}; pushed branch left for manual PR"
 
     if mode == "auto-merge":
         r = _git(root, "merge", "--no-ff", "-m", f"autobuild: merge {tid}", branch)
