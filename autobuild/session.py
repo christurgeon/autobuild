@@ -203,20 +203,27 @@ def _session_flags(config: Config, sdir: Path, *, sandbox: bool) -> list[str]:
     return flags
 
 
-# Push/transport credentials a session never needs (the harness pushes from the PARENT,
-# post-verification), stripped from the child env so a prompt-injected agent loses the
-# easiest exfil/push primitive. Defense-in-depth only — the real boundary is the sandbox
-# VM. The agent's own auth (ANTHROPIC_*) and its commit identity (GIT_AUTHOR_* /
-# GIT_COMMITTER_* / GIT_CONFIG_*) are deliberately preserved so it can still commit.
+# Git push/transport credentials a session never needs (the harness pushes from the
+# PARENT, post-verification), stripped from the child env so a prompt-injected agent loses
+# the easiest push primitive. Defense-in-depth only (NOT a general secret scrubber — the
+# real boundary is the sandbox VM). The agent's commit identity rides on GIT_AUTHOR_* /
+# GIT_COMMITTER_* (and GIT_CONFIG_GLOBAL/SYSTEM, file pointers) — all kept so it can still
+# commit; its own auth (ANTHROPIC_*) is kept too.
 _CREDENTIAL_ENV_DENYLIST = frozenset({
     "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITLAB_TOKEN",
     "SSH_AUTH_SOCK", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_SSH", "GIT_SSH_COMMAND",
+    # Inline git config injection — would otherwise re-enable credential.helper /
+    # core.sshCommand and defeat the denials above. (KEY_*/VALUE_* matched by prefix.)
+    "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
 })
+_CREDENTIAL_ENV_DENY_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
 
 
 def _session_env() -> dict[str, str]:
-    """The child's environment: the parent's, minus push/transport credentials."""
-    return {k: v for k, v in os.environ.items() if k not in _CREDENTIAL_ENV_DENYLIST}
+    """The child's environment: the parent's, minus git push/transport credentials."""
+    return {k: v for k, v in os.environ.items()
+            if k not in _CREDENTIAL_ENV_DENYLIST
+            and not k.startswith(_CREDENTIAL_ENV_DENY_PREFIXES)}
 
 
 def _done_dependencies(task: Task, paths: Paths) -> list[str]:
