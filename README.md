@@ -1,8 +1,22 @@
 # autobuild
 
-A lightweight, file-native harness that drains a human-curated backlog toward a
-**GOAL** by spawning fresh, isolated Claude Code sessions in parallel git
-worktrees, each following a **plan → review → implement** contract.
+> **Point it at a backlog. Walk away. Come back to merged PRs.**
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
+[![Runtime deps: 1](https://img.shields.io/badge/runtime%20deps-1%20(PyYAML)-brightgreen.svg)](pyproject.toml)
+[![CI](https://github.com/christurgeon/autobuild/actions/workflows/ci.yml/badge.svg)](https://github.com/christurgeon/autobuild/actions/workflows/ci.yml)
+
+autobuild drains a human-curated backlog toward a **`GOAL`** by spawning fresh,
+isolated Claude Code sessions in parallel git worktrees — each one **plans,
+self-reviews, implements, runs your checks**, and then opens a PR or auto-merges.
+Every session starts from a clean context; all state lives in **files and git**, so a
+run is disposable and crash-safe. Kill it mid-flight and re-run — it recovers from the
+files alone.
+
+<!-- Demo: a real autobuild run fanning out across worktrees and draining the backlog.
+     Recorded token-free against the repo's stub agent (real orchestration, canned edits). -->
+![autobuild draining a backlog in parallel worktrees](docs/demo.gif)
 
 Think of it as the missing glue between three ideas that already work:
 
@@ -16,7 +30,7 @@ Think of it as the missing glue between three ideas that already work:
 
 autobuild ties them together and adds the part nobody automates: **worktree fan-out**
 so N agents run in parallel without colliding, and **per-session state** under
-`.autobuild/` so every run is disposable and crash-safe.
+`.autobuild/` that a single supervisor verifies before anything lands on your branch.
 
 ## The mental model
 
@@ -32,15 +46,40 @@ tasks/             <- one .md per task. Humans own it; agents append follow-ups.
   backlog.lock     <- atomic task-claiming so parallel agents never grab the same task
 ```
 
-The loop, in one breath: **scheduler** picks the highest-priority unblocked tasks and
-atomically claims up to `max_parallel` of them → each claimed task gets a **fresh
-Claude session in its own git worktree** → the session plans, self-reviews, implements,
-runs checks, commits, and writes a `result.json` sentinel → the **reaper**
-re-runs the configured `checks` against that worktree itself (trust, but verify) and,
-only if they pass, marks the task `done` (opening a PR or auto-merging per config);
-a failed check or a `BLOCKED` sentinel leaves the branch and blocks the task, and a session that
-blows its `task_timeout_seconds` deadline has its whole process group killed and its task marked
-`timeout` for later retry → repeat until the backlog is drained or a stop condition trips.
+The loop, step by step:
+
+1. The **scheduler** picks the highest-priority unblocked tasks and atomically claims up
+   to `max_parallel` of them.
+2. Each claimed task gets a **fresh Claude session in its own git worktree**. The session
+   plans, self-reviews, implements, runs your checks, commits, and writes a `result.json`
+   sentinel.
+3. The **reaper** re-runs the configured `checks` against that worktree itself (*trust, but
+   verify*) and, only if they pass, marks the task `done` — opening a PR or auto-merging per
+   config.
+4. A failed check or a `BLOCKED` sentinel leaves the branch intact and blocks the task. A
+   session that blows its `task_timeout_seconds` deadline has its whole process group killed
+   and its task marked `timeout` for retry.
+5. Repeat until the backlog is drained or a stop condition trips.
+
+## What a run looks like
+
+Say you've written four tasks — `db-schema`, then `api-layer` and `cli-flags` (both depend
+on it), then `docs` (depends on the API). With `max_parallel: 3`:
+
+```text
+$ autobuild run
+iter 1  claimed: db-schema                  → session a1 (worktree autobuild/db-schema)
+iter 1  reaped:  db-schema   COMPLETE  ✓ checks passed  → merged
+iter 2  claimed: api-layer, cli-flags        → sessions b2, c3  (running in parallel)
+iter 2  reaped:  cli-flags   COMPLETE  ✓ checks passed  → PR #41
+iter 2  reaped:  api-layer   BLOCKED   ✗ left branch autobuild/api-layer for you
+iter 3  skipped: docs  (blocked: depends on api-layer)
+backlog settled: 2 done, 1 blocked, 1 waiting — nothing left to run
+```
+
+Independent tasks ran at once; the dependent `docs` task never started because its
+dependency blocked; the blocked branch is preserved for you to pick up. No context carried
+between any of them — each was a clean process driven entirely by the files.
 
 ## Quick start
 
