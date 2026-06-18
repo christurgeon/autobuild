@@ -1,8 +1,8 @@
-"""Config loading and validation. Ports cfg/cfg_list from common.sh, but parses
-YAML with PyYAML instead of grep/sed. Flat schema, all keys optional with the bash
-defaults. Unlike the bash version, values are validated at load time: every problem
-is aggregated into a single ConfigError so a typo (integration: prr, max_parallel: 0)
-fails fast with an actionable message instead of surfacing later inside the loop."""
+"""Config loading and validation. Parses .autobuild/config.yml with PyYAML into a
+typed, frozen Config. Flat schema, all keys optional with sensible defaults. Values
+are validated at load time: every problem is aggregated into a single ConfigError so
+a typo (integration: prr, max_parallel: 0) fails fast with an actionable message
+instead of surfacing later inside the loop."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ class Config:
     checks: list[str] = field(default_factory=list)
     verify_checks: bool = True  # re-run checks in the reaper before integrating
     claude_cmd: str = "claude"
-    # --- session permission posture (task-102) -------------------------------
+    # --- session permission posture ------------------------------------------
     # Default is maximally permissive: full bypass, no sandbox gate, so a session can do
     # whatever it needs unattended. The trade-off (the agent inherits this machine's git
     # credentials + network) is the operator's to accept — see the README security note.
@@ -35,9 +35,9 @@ class Config:
     session_max_turns: int = 40  # --max-turns; int >= 1
     dangerously_bypass_permissions: bool = True  # => --dangerously-skip-permissions ...
     require_sandbox_for_bypass: bool = False  # ... and do NOT require AUTOBUILD_SANDBOX
-    # --- per-session timeout plumbing (task-104) -----------------------------
+    # --- per-session timeout plumbing ----------------------------------------
     task_timeout_seconds: int = 1800  # int >= 1; monotonic per-session deadline
-    kill_grace_seconds: int = 10      # int >= 1; SIGTERM -> wait -> SIGKILL (used in 105)
+    kill_grace_seconds: int = 10      # int >= 1; SIGTERM -> wait -> SIGKILL
 
 
 # Top-level keys autobuild understands. Anything else is a likely typo and warned.
@@ -151,37 +151,9 @@ def load_config(path: Path) -> Config:
     max_parallel = want_int("max_parallel", defaults.max_parallel)
     max_iterations = want_int("max_iterations", defaults.max_iterations)
 
-    integration = defaults.integration
-    if "integration" in data:
-        v = data["integration"]
-        if not isinstance(v, str) or v not in VALID_INTEGRATIONS:
-            problems.append(
-                f"integration must be one of {', '.join(VALID_INTEGRATIONS)} "
-                f"(got {v!r})"
-            )
-        else:
-            integration = v
-
-    checks = list(defaults.checks)
-    if data.get("checks") is not None:
-        v = data["checks"]
-        if isinstance(v, str):
-            problems.append(
-                "checks must be a YAML list of commands, not a single string. "
-                f"Write it as:\n      checks:\n        - {v!r}"
-            )
-        elif not isinstance(v, list):
-            problems.append(
-                f"checks must be a list of non-empty strings (got {type(v).__name__})"
-            )
-        else:
-            cleaned: list[str] = []
-            for i, c in enumerate(v):
-                if not isinstance(c, str) or not c.strip():
-                    problems.append(f"checks[{i}] must be a non-empty string (got {c!r})")
-                else:
-                    cleaned.append(c)
-            checks = cleaned
+    integration = want_enum("integration", defaults.integration, VALID_INTEGRATIONS)
+    checks = want_str_list("checks", defaults.checks)
+    verify_checks = want_bool("verify_checks", defaults.verify_checks)
 
     permission_mode = want_enum("permission_mode", defaults.permission_mode,
                                 VALID_PERMISSION_MODES)
@@ -204,7 +176,7 @@ def load_config(path: Path) -> Config:
         max_iterations=max_iterations,
         integration=integration,
         checks=checks,
-        verify_checks=bool(data.get("verify_checks", defaults.verify_checks)),
+        verify_checks=verify_checks,
         claude_cmd=claude_cmd,
         permission_mode=permission_mode,
         allowed_tools=allowed_tools,

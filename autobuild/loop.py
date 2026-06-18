@@ -1,10 +1,11 @@
 """The outer Ralph-style loop, the reaper, reconcile, status, and clean.
-Ports loop.sh, with the audit's corruption/hang fixes:
 
-- reaper is idempotent (a reaped.json marker; bash re-integrated every pass);
-- integration runs BEFORE the task is marked done (bash set done first);
-- follow-up ids are allocated under the backlog lock (bash raced on max(ls));
-- a startup reconcile restores crash-safe resume without the .running PID file;
+Key invariants this module upholds:
+- the reaper is idempotent (a reaped.json marker guards re-integration);
+- integration runs BEFORE the task is marked done, so a failed merge never leaves
+  a falsely-'done' task;
+- follow-up ids are allocated under the backlog lock, so concurrent reaps can't collide;
+- a startup reconcile restores crash-safe resume from files + git alone (no PID file);
 - the loop terminates when nothing runs AND nothing is runnable, instead of
   spinning to max_iterations on tasks stuck behind unsatisfiable deps.
 """
@@ -13,7 +14,6 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
-import json
 import os
 import signal
 import subprocess
@@ -24,10 +24,11 @@ from shutil import which
 
 from .config import Config
 from .paths import Paths
-from .scheduler import backlog_lock, claim_tasks, runnable_tasks, stuck_tasks
+from .scheduler import backlog_lock, claim_tasks, stuck_tasks
 from .session import (
     RunningSession,
     _atomic_write_json,
+    parse_leading_json,
     spawn_session,
     write_sentinel_if_absent,
 )
@@ -64,26 +65,16 @@ def _now() -> str:
 
 
 def _read_json(path: Path) -> dict | None:
+    """Read `path` and parse it as a JSON object via parse_leading_json (tolerating
+    stray trailing data after a valid leading object). Returns None if the file is
+    unreadable, torn/partial, or parses to a non-object — returning a non-dict would
+    crash callers that do `.get()` (reap_session, collect_status), wedging
+    run/reap/status on a single poisoned file."""
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
         return None
-    try:
-        obj = json.loads(text)
-    except ValueError:
-        # Tolerate trailing data after a valid JSON object — agents sometimes append
-        # stray output (e.g. a closing tag) after the sentinel. Salvage the leading
-        # object so a task that genuinely finished is not silently stranded. A truly
-        # torn/partial write (no complete leading object) still returns None and is
-        # retried next pass.
-        try:
-            obj, _ = json.JSONDecoder().raw_decode(text.lstrip())
-        except ValueError:
-            return None
-    # Return only a JSON *object* (dict). A non-dict sentinel (`[]`, `"x"`, `5`) is not a
-    # usable result; returning it would let callers that do `.get()` (reap_session,
-    # collect_status) crash — a single poisoned file would wedge run/reap/status.
-    return obj if isinstance(obj, dict) else None
+    return parse_leading_json(text)
 
 
 def _classify_sentinel(sdir: Path) -> str:
@@ -341,10 +332,10 @@ def _reap_session_locked(sdir: Path, result: dict, config: Config, paths: Paths)
         warn(f"{sid}: {tid} NEEDS_HUMAN — see {sdir / 'result.json'}")
     elif status == "TIMEOUT":
         # A killed-past-deadline session: a distinct, retryable status. NEVER integrated
-        # or verified (its tree is incomplete), and no follow-ups filed. Retry lands in 106.
+        # or verified (its tree is incomplete), and no follow-ups filed.
         if task:
             set_status(task.path, "timeout")
-        warn(f"{sid}: {tid} TIMEOUT — killed past deadline (retry pending in a later task)")
+        warn(f"{sid}: {tid} TIMEOUT — killed past deadline (awaiting retry)")
     else:
         warn(f"{sid}: unrecognized status '{status}'")
         return False

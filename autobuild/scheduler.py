@@ -1,10 +1,10 @@
-"""Scheduler — choose runnable tasks and claim them atomically. Ports scheduler.sh.
+"""Scheduler — choose runnable tasks and claim them atomically.
 
 A task is runnable when status==todo and every depends_on id is `done`. The queue
 is ordered by (priority, id). Claiming flips todo->claimed under an exclusive lock
 so parallel runs never grab the same task. The lock is fcntl.flock on
-.autobuild/backlog.lock (auto-released if the holder dies) rather than the bash
-mkdir lockdir, which could strand a stale lock after a crash.
+.autobuild/backlog.lock, auto-released if the holder dies so a crash strands no
+stale lock.
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ def stuck_tasks(tasks: list[Task], index: dict[str, Task]) -> dict[str, str]:
         if task.status == "blocked":
             return f"blocked-dependency: {tid}"
         if task.status == "timeout":
-            # non-terminal, but cannot reach `done` on its own until retry (task-106)
+            # non-terminal, but cannot reach `done` on its own until it is retried
             return f"timed-out-dependency: {tid}" if path else "timed-out: awaiting retry"
         path.append(tid)
         try:

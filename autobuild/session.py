@@ -1,6 +1,6 @@
 """Session spawning — launch one fresh `claude -p` per task in its own worktree.
-Ports session.sh. Replaces the bash `.running` PID file with an in-memory
-RunningSession handle the loop supervises via Popen.poll()."""
+Returns an in-memory RunningSession handle the loop supervises via Popen.poll();
+all crash-recovery state lives in files (meta.json) + git, never in memory alone."""
 
 from __future__ import annotations
 
@@ -74,23 +74,31 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def _result_is_parseable(sdir: Path) -> bool:
-    """True if result.json already holds a usable JSON object — a real result the
-    harness must not clobber. Mirrors loop._classify_sentinel's "reapable" rule (a valid
-    leading object plus stray trailing junk still counts); kept local so this lower-level
-    module keeps no upward import to loop.py."""
-    try:
-        text = (sdir / "result.json").read_text(encoding="utf-8")
-    except OSError:
-        return False
+def parse_leading_json(text: str) -> dict | None:
+    """Parse `text` as a JSON object, tolerating stray trailing data after a valid
+    leading object — agents sometimes append output (e.g. a closing tag) after the
+    sentinel. Returns the object, or None if there is no complete leading object, or it
+    parses to a non-object (`[]`, `"x"`, `5`) — which is not a usable result. This is the
+    single definition of what makes a sentinel "reapable"; both the harness's guarded
+    sentinel writes and the reaper's reads go through it."""
     try:
         obj = json.loads(text)
     except ValueError:
         try:
             obj, _ = json.JSONDecoder().raw_decode(text.lstrip())
         except ValueError:
-            return False
-    return isinstance(obj, dict)
+            return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _result_is_parseable(sdir: Path) -> bool:
+    """True if result.json already holds a usable JSON object — a real result the
+    harness must not clobber."""
+    try:
+        text = (sdir / "result.json").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return parse_leading_json(text) is not None
 
 
 def write_sentinel(sdir: Path, tid: str, status: str, summary: str,
@@ -121,7 +129,7 @@ def write_sentinel_if_absent(sdir: Path, tid: str, status: str, summary: str,
     return True
 
 
-# --- session permission posture (task-102) -----------------------------------
+# --- session permission posture ----------------------------------------------
 
 class BypassNotPermitted(RuntimeError):
     """Raised when a permission-bypass posture is requested but the sandbox gate
@@ -308,9 +316,10 @@ def spawn_session(task: Task, config: Config, paths: Paths) -> RunningSession:
 
     # The child is now live: from here on, never return without its handle — a lost
     # RunningSession would orphan a running process the loop can't reap or kill.
-    # deadline is computed first (it cannot fail) so 105 can always time the child out;
-    # it is monotonic and in-memory only (a crashed supervisor's orphans are reclaimed by
-    # reconcile's kill, not by deadline expiry, and monotonic() isn't cross-process).
+    # deadline is computed first (it cannot fail) so the loop can always time the child
+    # out; it is monotonic and in-memory only (a crashed supervisor's orphans are
+    # reclaimed by reconcile's kill, not by deadline expiry, and monotonic() isn't
+    # cross-process).
     deadline = time.monotonic() + config.task_timeout_seconds
     pgid: int | None = None
     try:

@@ -1,5 +1,5 @@
 """Project paths. All commands run from the target project root; these resolve
-relative to it, mirroring the bash variables in common.sh."""
+relative to it. The one place every .autobuild/ location is defined."""
 
 from __future__ import annotations
 
