@@ -596,15 +596,20 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float) -> None:
     running: list[RunningSession] = []
     iteration = 0
     while True:
-        iteration += 1
-        if iteration > config.max_iterations:
-            warn(f"hit max_iterations ({config.max_iterations}); stopping")
-            break
-
         running = _harvest(running, config, paths)
 
         free = config.max_parallel - len(running)
-        claimed = claim_tasks(free, paths) if free > 0 else []
+        # max_iterations bounds SCHEDULING ROUNDS (passes that start new work), not poll
+        # ticks: a session that spans many _wait_until_next_event polls must not exhaust
+        # the budget — a long session is bounded by its own task_timeout_seconds. So only a
+        # pass that actually claims work counts against the cap, and once it's spent we stop
+        # claiming but keep draining what's already running (never abandoning in-flight work).
+        # (Counting every pass made the cap a ~max_iterations*sleep_seconds wall-clock limit
+        # that tripped mid-run and stranded finished-but-unreaped work as in-progress.)
+        over_budget = iteration >= config.max_iterations
+        claimed = claim_tasks(free, paths) if (free > 0 and not over_budget) else []
+        if claimed:
+            iteration += 1
         for t in claimed:
             rs = spawn_session(t, config, paths)
             log(f"spawn {rs.sid} -> {rs.tid}")
@@ -617,7 +622,13 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float) -> None:
         if not running:
             tasks = iter_tasks(paths.tasks_dir)
             pending = [t for t in tasks if not is_terminal(t.status)]
-            if not pending:
+            if over_budget and pending:
+                # Budget spent with work still left: report the cap accurately instead of
+                # claiming a clean drain. In-flight sessions were drained above, so the only
+                # thing unfinished is work we declined to start — raise max_iterations to do more.
+                warn(f"hit max_iterations ({config.max_iterations}); stopping with "
+                     f"{len(pending)} unfinished task(s) — see 'autobuild status'")
+            elif not pending:
                 ok("backlog drained — COMPLETE")
             else:
                 stuck = stuck_tasks(tasks, {t.id: t for t in tasks})
