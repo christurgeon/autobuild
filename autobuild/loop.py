@@ -408,6 +408,37 @@ def reap_stalled(running: list[RunningSession], paths: Paths) -> None:
                                      "session process exited without writing result.json")
 
 
+def _kill_orphan_group(pgid: object) -> bool:
+    """SIGKILL an orphaned session's process group — a crashed run's detached `claude`
+    subtree (reparented to init). Returns True if we signalled it.
+
+    Heavily guarded, because os.killpg(pgid) maps to kill(-pgid): pgid 0 == OUR OWN group
+    (would SIGKILL the running harness), pgid 1 == kill(-1) == a BROADCAST SIGKILL to every
+    process we may signal, and the harness's own group must never be hit by a corrupted
+    meta. We also suppress ESRCH (group already gone) AND EPERM (a recycled pgid we may not
+    signal) so one un-killable orphan never aborts the whole reconcile sweep.
+
+    CAVEAT — pgid reuse: a recorded pgid shares the pid number space, so after the original
+    leader exited and was reaped the OS can recycle the number into an unrelated group (>1);
+    worst case this signals that group. The window is bounded — reconcile runs only under
+    the run lock, at startup shortly after a crash, on a host where autobuild is the only
+    thing spawning detached groups, so a collision needs that exact number recycled since
+    the crash. A portable leader-identity check isn't feasible without a new dependency (no
+    /proc on macOS); a stronger guard is deferred as future hardening."""
+    if not isinstance(pgid, int) or isinstance(pgid, bool) or pgid <= 1:
+        return False
+    if pgid == os.getpgrp():
+        return False
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+        return True
+    except ProcessLookupError:
+        return False  # group already gone — nothing to reclaim
+    except PermissionError:
+        warn(f"cannot signal orphaned process group {pgid} (permission denied); skipping")
+        return False
+
+
 # --- reconcile (startup crash recovery) -------------------------------------
 
 def reconcile(paths: Paths, *, sweep_in_progress: bool = False) -> None:
@@ -446,6 +477,11 @@ def reconcile(paths: Paths, *, sweep_in_progress: bool = False) -> None:
                     reason = ("result.json present but could not be parsed as a JSON object"
                               if kind == "corrupt"
                               else "no result.json was written")
+                    # Reclaim the crashed run's detached process tree BEFORE blocking — so the
+                    # orphan is dead before any later reap touches its worktree.
+                    pgid = meta.get("pgid")
+                    if _kill_orphan_group(pgid):
+                        warn(f"killed orphaned process group {pgid} for {tid}")
                     warn(f"orphaned in-progress session {sdir.name}; marking {tid} BLOCKED")
                     write_sentinel_if_absent(sdir, tid, "BLOCKED",
                                              f"orphaned: run restarted while session was in-progress; {reason}")

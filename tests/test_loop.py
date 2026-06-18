@@ -1002,3 +1002,89 @@ def test_reap_recovers_after_lock_holder_is_killed(git_repo):
         child.wait()                                     # SIGKILL -> kernel releases the flock
     assert reap_session(sdir, Config(integration="branch"), paths) is True       # now reaps
     assert read_task(paths.tasks_dir / "task-001.md").status == "done"
+
+
+# ---- 107 slice: orphan-kill on reconcile -----------------------------------
+
+def _orphan_session(paths, pgid_field):
+    """An orphaned in-progress session: meta.json (with optional pgid), no result yet."""
+    add_task(paths, "task-001", status="in-progress")
+    sdir = paths.sessions_dir / "sess-x"
+    sdir.mkdir(parents=True)
+    meta = {"task": "task-001", "branch": "autobuild/task-001", **pgid_field}
+    (sdir / "meta.json").write_text(json.dumps(meta))
+    return sdir
+
+
+def test_reconcile_kills_orphan_pgid_before_blocking(git_repo, monkeypatch):
+    paths = setup(git_repo)
+    pgid = os.getpgrp() + 100000                          # >1, not our group, not real
+    sdir = _orphan_session(paths, {"pgid": pgid})
+    events = []
+    monkeypatch.setattr(loop_mod.os, "killpg", lambda p, s: events.append(("kill", p, s)))
+    real = loop_mod.write_sentinel_if_absent
+    monkeypatch.setattr(loop_mod, "write_sentinel_if_absent",
+                        lambda *a, **k: (events.append(("block",)), real(*a, **k))[1])
+    reconcile(paths, sweep_in_progress=True)
+    assert ("kill", pgid, signal.SIGKILL) in events
+    assert events.index(("kill", pgid, signal.SIGKILL)) < events.index(("block",))  # kill first
+    assert json.loads((sdir / "result.json").read_text())["status"] == "BLOCKED"
+
+
+@pytest.mark.parametrize("field", [{}, {"pgid": 0}, {"pgid": 1}, {"pgid": -5}, {"pgid": True}, {"pgid": "OWN"}])
+def test_reconcile_never_kills_unsafe_pgid(git_repo, monkeypatch, field):
+    paths = setup(git_repo)
+    field = dict(field)
+    if field.get("pgid") == "OWN":
+        field["pgid"] = os.getpgrp()                      # never kill the harness's own group
+    sdir = _orphan_session(paths, field)
+    called = []
+    monkeypatch.setattr(loop_mod.os, "killpg", lambda p, s: called.append((p, s)))
+    reconcile(paths, sweep_in_progress=True)
+    assert called == []                                   # never signalled
+    assert json.loads((sdir / "result.json").read_text())["status"] == "BLOCKED"  # still blocked
+
+
+@pytest.mark.parametrize("exc", [ProcessLookupError, PermissionError])
+def test_reconcile_orphan_kill_suppresses_signal_errors(git_repo, monkeypatch, exc):
+    paths = setup(git_repo)
+    sdir = _orphan_session(paths, {"pgid": os.getpgrp() + 100000})
+
+    def boom(p, s):
+        raise exc()
+
+    monkeypatch.setattr(loop_mod.os, "killpg", boom)
+    reconcile(paths, sweep_in_progress=True)              # must not raise / abort the sweep
+    assert json.loads((sdir / "result.json").read_text())["status"] == "BLOCKED"
+
+
+def test_reconcile_kills_a_real_orphan_group(git_repo):
+    """Confidence: a real setsid child group is actually killed. NOTE: here the test is the
+    child's parent and must reap it; in production reconcile is NOT the parent (init reaps)."""
+    import subprocess
+    paths = setup(git_repo)
+    proc = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    pgid = os.getpgid(proc.pid)
+    assert pgid == proc.pid                               # own group leader
+    sdir = _orphan_session(paths, {"pgid": pgid})
+    try:
+        reconcile(paths, sweep_in_progress=True)
+        proc.wait(timeout=3)
+        assert proc.poll() is not None                    # actually killed
+        assert json.loads((sdir / "result.json").read_text())["status"] == "BLOCKED"
+    finally:
+        try:
+            os.killpg(pgid, signal.SIGKILL)               # fallback cleanup
+        except ProcessLookupError:
+            pass
+        proc.wait()
+
+
+def test_reconcile_without_sweep_never_kills(git_repo, monkeypatch):
+    paths = setup(git_repo)
+    sdir = _orphan_session(paths, {"pgid": os.getpgrp() + 100000})
+    called = []
+    monkeypatch.setattr(loop_mod.os, "killpg", lambda p, s: called.append(1))
+    reconcile(paths)                                      # sweep gated off (default)
+    assert called == []
+    assert not (sdir / "result.json").exists()           # no BLOCK either
