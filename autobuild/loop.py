@@ -40,7 +40,7 @@ from .tasks import (
     set_status,
     task_index,
 )
-from .worktree import branch_name, prune_worktrees, remove_worktree
+from .worktree import branch_name, delete_branch, prune_worktrees, remove_worktree
 
 # --- logging -----------------------------------------------------------------
 
@@ -341,6 +341,12 @@ def _reap_session_locked(sdir: Path, result: dict, config: Config, paths: Paths)
         return False
 
     remove_worktree(paths, sid)
+    # Under auto-merge the branch's commits now live on base_branch via the merge commit,
+    # so the autobuild/<tid> branch is redundant — delete it (safely) instead of letting it
+    # accumulate. Other modes keep the branch: it is the deliverable (pr/branch) and a
+    # dependent may still need it to layer (the commits live nowhere else).
+    if integrated and config.integration == "auto-merge":
+        delete_branch(paths, tid)
     _atomic_write_json(sdir / "reaped.json",
                        {"reaped_at": _now(), "status": status, "integrated": integrated,
                         "checks": checks_outcome, "followups": followups})

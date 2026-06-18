@@ -47,14 +47,37 @@ def test_e2e_runs_chain_in_dependency_order(git_repo, stub_bin, monkeypatch, git
     loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=5)
 
     assert statuses(paths) == {"task-001": "done", "task-002": "done", "task-003": "done"}
+    # auto-merge deletes each redundant branch after merging it (see the dedicated test);
+    # the chain still completes because each dependent forks from base + skips the gone branch
     for tid in ("task-001", "task-002", "task-003"):
         assert git(git_repo, "show-ref", "--verify", "--quiet",
-                   f"refs/heads/{branch_name(tid)}", check=False).returncode == 0
+                   f"refs/heads/{branch_name(tid)}", check=False).returncode != 0
 
     # merge commits land on main in dependency order (newest first in the log)
     merges = git(git_repo, "log", "--merges", "--oneline", "main").stdout
     i1, i2, i3 = (merges.index(f"merge task-00{n}") for n in (1, 2, 3))
     assert i3 < i2 < i1
+
+
+def test_e2e_auto_merge_deletes_the_redundant_branch(git_repo, stub_bin, monkeypatch, git):
+    """After a successful auto-merge the autobuild/<tid> branch is deleted: its commits
+    already live on base_branch via the merge commit, so the branch is redundant and would
+    otherwise accumulate. A dependent still builds correctly — it forks from base (which has
+    the dep) and the layering step skips the now-gone branch."""
+    stub_bin()
+    paths = init_project(git_repo, monkeypatch, integration="auto-merge")
+    write_task(paths, "task-001")
+    write_task(paths, "task-002", depends_on=["task-001"])  # proves the chain still works
+
+    loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=5)
+
+    assert statuses(paths) == {"task-001": "done", "task-002": "done"}
+    for tid in ("task-001", "task-002"):
+        # the merge landed on main...
+        assert f"merge {tid}" in git(git_repo, "log", "--merges", "--oneline", "main").stdout
+        # ...and the redundant branch is gone
+        assert git(git_repo, "show-ref", "--verify", "--quiet",
+                   f"refs/heads/{branch_name(tid)}", check=False).returncode != 0
 
 
 def test_e2e_pr_mode_dependency_visible_in_downstream_worktree(git_repo, stub_bin, monkeypatch):

@@ -124,3 +124,21 @@ def remove_worktree(paths: Paths, sid: str) -> None:
 
 def prune_worktrees(paths: Paths) -> None:
     _git(paths.root, "worktree", "prune", check=False)
+
+
+def delete_branch(paths: Paths, tid: str) -> bool:
+    """Delete the task's autobuild/<tid> branch with `git branch -d` (SAFE delete: git
+    refuses a branch not fully merged into the checked-out base_branch). Returns True if it
+    was removed.
+
+    Called after an auto-merge integration, where the branch's commits already live on
+    base_branch via the --no-ff merge commit, so the branch is redundant and would
+    otherwise pile up. It is a no-op (returns False) if the branch is already gone or git
+    refuses it — never a force-delete, so a not-yet-integrated deliverable branch (pr /
+    branch mode, or a blocked task) is always safe. A still-pending dependent is fine too:
+    it forks from base_branch (which carries the dep) and _merge_dependencies skips the
+    now-absent branch."""
+    branch = branch_name(tid)
+    if not _branch_exists(paths.root, branch):
+        return False
+    return _git(paths.root, "branch", "-d", branch, check=False).returncode == 0
