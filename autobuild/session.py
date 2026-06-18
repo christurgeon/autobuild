@@ -203,6 +203,22 @@ def _session_flags(config: Config, sdir: Path, *, sandbox: bool) -> list[str]:
     return flags
 
 
+# Push/transport credentials a session never needs (the harness pushes from the PARENT,
+# post-verification), stripped from the child env so a prompt-injected agent loses the
+# easiest exfil/push primitive. Defense-in-depth only — the real boundary is the sandbox
+# VM. The agent's own auth (ANTHROPIC_*) and its commit identity (GIT_AUTHOR_* /
+# GIT_COMMITTER_* / GIT_CONFIG_*) are deliberately preserved so it can still commit.
+_CREDENTIAL_ENV_DENYLIST = frozenset({
+    "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITLAB_TOKEN",
+    "SSH_AUTH_SOCK", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_SSH", "GIT_SSH_COMMAND",
+})
+
+
+def _session_env() -> dict[str, str]:
+    """The child's environment: the parent's, minus push/transport credentials."""
+    return {k: v for k, v in os.environ.items() if k not in _CREDENTIAL_ENV_DENYLIST}
+
+
 def _done_dependencies(task: Task, paths: Paths) -> list[str]:
     """Dependency ids whose task is `done`, in declaration order. The scheduler only
     makes a task runnable once every dep is done, but filter defensively so a direct
@@ -272,6 +288,7 @@ def spawn_session(task: Task, config: Config, paths: Paths) -> RunningSession:
         proc = Popen(
             [config.claude_cmd, "-p", prompt, "--model", config.model, *flags],
             cwd=str(wt), stdout=out, stderr=err, start_new_session=True,
+            env=_session_env(),
         )
     except FileNotFoundError:
         out.close()

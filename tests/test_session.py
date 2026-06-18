@@ -246,3 +246,33 @@ def test_spawn_conflicting_dependency_blocks_with_dep_named(git_repo, diverging_
     assert result["status"] == "BLOCKED"
     assert "task-001" in result["summary"]
     assert read_task(dep_task.path).status == "blocked"
+
+
+# ---- audit I-2: scrub push/transport credentials from the child env ---------
+
+def test_session_env_drops_push_credentials(monkeypatch):
+    for k in ("GH_TOKEN", "SSH_AUTH_SOCK", "GIT_SSH_COMMAND"):
+        monkeypatch.setenv(k, "secret")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "ab")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "keep-me")
+    env = session_mod._session_env()
+    assert "GH_TOKEN" not in env
+    assert "SSH_AUTH_SOCK" not in env
+    assert "GIT_SSH_COMMAND" not in env
+    assert env["GIT_AUTHOR_NAME"] == "ab"          # commit identity preserved
+    assert env["ANTHROPIC_API_KEY"] == "keep-me"   # the agent's own auth preserved
+    assert "PATH" in env                            # a complete env, not a fragment
+
+
+def test_spawn_scrubs_credentials_from_child_env(git_repo, monkeypatch, stub_pgid):
+    paths = make_project(git_repo)
+    task = write_task(paths)
+    monkeypatch.setenv("GH_TOKEN", "secret")
+    captured = {}
+    monkeypatch.setattr(session_mod, "Popen",
+                        lambda argv, **kw: (captured.update(kw),
+                                            type("P", (), {"poll": lambda s: None})())[1])
+    spawn_session(task, Config(), paths)
+    assert "env" in captured
+    assert "GH_TOKEN" not in captured["env"]
+    assert "PATH" in captured["env"]                # the child still gets a full env
