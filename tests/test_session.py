@@ -276,3 +276,22 @@ def test_spawn_scrubs_credentials_from_child_env(git_repo, monkeypatch, stub_pgi
     assert "env" in captured
     assert "GH_TOKEN" not in captured["env"]
     assert "PATH" in captured["env"]                # the child still gets a full env
+
+
+def test_session_env_drops_git_config_injection(monkeypatch):
+    """GIT_CONFIG_COUNT/KEY_*/VALUE_*/PARAMETERS inject arbitrary git config (credential
+    helpers, core.sshCommand) into every child git call — deny them. GIT_CONFIG_GLOBAL/
+    SYSTEM (file pointers) and the AUTHOR/COMMITTER identity vars stay."""
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.sshCommand")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "evil")
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'core.sshCommand=evil'")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/tmp/gc")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "ab")
+    env = session_mod._session_env()
+    assert "GIT_CONFIG_COUNT" not in env
+    assert "GIT_CONFIG_KEY_0" not in env
+    assert "GIT_CONFIG_VALUE_0" not in env
+    assert "GIT_CONFIG_PARAMETERS" not in env
+    assert env["GIT_CONFIG_GLOBAL"] == "/tmp/gc"      # file pointer, benign -> kept
+    assert env["GIT_COMMITTER_NAME"] == "ab"          # commit identity -> kept
