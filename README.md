@@ -99,6 +99,10 @@ autobuild run            # drains the backlog
 autobuild status         # see task + session state at any time
 ```
 
+> **Want a filled-out backlog to look at first?** [`examples/quotes-api/`](examples/quotes-api/)
+> is a complete worked example — a `GOAL.md` plus six tasks with a real dependency graph — that
+> you can read or copy into a fresh repo (see [`examples/README.md`](examples/README.md)).
+
 ## Commands
 
 | Command | What it does |
@@ -167,6 +171,13 @@ Be honest about where the boundary is:
   could `git push origin HEAD:main` and bypass the verify-before-integrate gate. Pushing
   stays the *harness's* job, after verification — so withhold credentials/egress from the
   session environment.
+- **The harness already strips env-based push credentials (defense-in-depth).** Before a
+  session launches, its environment has git push tokens and transport helpers removed
+  (`GH_TOKEN`/`GITHUB_TOKEN`/`GITLAB_TOKEN`, `SSH_AUTH_SOCK`, `GIT_ASKPASS`/`SSH_ASKPASS`,
+  `GIT_SSH_COMMAND`, and inline `GIT_CONFIG_*` injection) — the agent keeps its commit
+  identity and its own `ANTHROPIC_*` auth but loses the easy push primitive. This is **not**
+  a secret scrubber: file-based credentials (`~/.git-credentials`, OS keychains, `~/.ssh`
+  keys) and the network are still inherited, so a disposable VM remains the only real boundary.
 - **A cloned target repo's `.claude/` is hostile input.** Its hooks would run with the
   agent's privileges; autobuild passes `--strict-mcp-config` and denies writes to
   `.claude/**`, but the real containment is still the VM.
