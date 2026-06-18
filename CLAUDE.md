@@ -15,7 +15,9 @@ installed package via `importlib.resources`). They are **not** instructions for 
 autobuild itself. In particular, `autobuild/templates/CLAUDE.md` is the **runtime contract a
 spawned session obeys** (plan → review → implement → write `result.json`). Editing it changes
 how *target-project sessions* behave, not how you work on this codebase. This root file is the
-only one that governs work on the harness.
+only one that governs work on the harness. (`examples/quotes-api/` is likewise *sample
+target-project data* — a worked backlog the README links to — not guidance for developing the
+harness.)
 
 ## Running and developing
 
@@ -88,14 +90,17 @@ Module responsibilities:
   `--dangerously-skip-permissions`, but only when the sandbox gate is satisfied — otherwise it
   raises `BypassNotPermitted` and the spawn is refused; a fenced posture emits `--permission-mode`,
   an `--allowedTools` allowlist, a `.claude/**` write-deny, and `--strict-mcp-config` (plus
-  `--max-turns` either way). It returns an in-memory `RunningSession` carrying the child's `pgid`
+  `--max-turns` either way). `_session_env` also strips git push/transport credentials
+  (`GH_TOKEN`/`GITHUB_TOKEN`, `SSH_AUTH_SOCK`, askpass + `GIT_SSH_COMMAND`, inline `GIT_CONFIG_*`
+  injection) from the child env as defense-in-depth — the agent keeps its commit identity and
+  `ANTHROPIC_*` auth. It returns an in-memory `RunningSession` carrying the child's `pgid`
   (also persisted to `meta.json`) and a **monotonic `deadline`** (`time.monotonic() +
   task_timeout_seconds`); the loop supervises it with `proc.poll()` plus that deadline — together
   replacing the bash `.running` PID file.
 - **`autobuild/loop.py`** — the outer Ralph-style loop (`run`, holding a single-supervisor
   `fcntl.flock` on `.autobuild/run.lock`), the reaper (`reap_all` / `reap_session`), session
   harvesting (`_harvest` / `_classify_sentinel`), the **per-session timeout** (deadline-bounded
-  waits via `_next_wait` / `_wait_for_progress`, and `_kill_group` / `_signal_session` —
+  waits via `_next_wait` / `_wait_until_next_event`, and `_kill_group` / `_signal_session` —
   `SIGTERM` → `kill_grace_seconds` → `SIGKILL` over the session's process group), `reconcile`
   (startup crash recovery), `verify_checks`, `integrate`, `file_followups`, `status`, and
   `clean`. The CLI `reap` maps to `reap` here (a lock-aware wrapper), not `reap_all` directly.
@@ -140,7 +145,7 @@ progress it blocks on the next live session finishing instead of busy-sleeping.
 
 `todo` → `claimed` → `in-progress` → terminal (`done` | `blocked`). A session killed past its
 deadline lands the task in `timeout` — **non-terminal**: it is never integrated or verified and
-awaits a retry (the automatic re-queue is task-106; until then it sits, and a dependent sees a
+awaits a retry (automatic re-queue of timed-out tasks is not yet implemented; until then it sits, and a dependent sees a
 `timed-out-dependency` blocker via `stuck_tasks`). `done` and `blocked` remain the only terminal
 states (`is_terminal` / the `TERMINAL` set); everything else (including `timeout`) counts as
 in-flight, which is what keeps the loop running. The template task file documents the human
