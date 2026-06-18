@@ -26,12 +26,24 @@ def write_task(paths, tid="task-001"):
 # ---- prompt + id ------------------------------------------------------------
 
 def test_build_prompt_has_contract_lines_the_stub_parses():
-    prompt = build_prompt("/s/dir", "/p/task-001.md", "/w/tree", "task-001")
+    prompt = build_prompt("/s/dir", "/p/task-001.md", "/w/tree", "task-001",
+                          "/root/GOAL.md", "/root/CLAUDE.md")
     import re
     assert re.search(r"session directory is:\s*(\S+)", prompt).group(1) == "/s/dir"
     assert re.search(r"Work ONLY on task\s+(\S+)", prompt).group(1).rstrip(".") == "task-001"
     assert "/p/task-001.md" in prompt
     assert "/w/tree" in prompt
+
+
+def test_build_prompt_points_at_root_contract_not_the_worktree():
+    """The session must read GOAL.md and CLAUDE.md by their ROOT absolute paths, not
+    "in this worktree": a worktree forked from the committed HEAD won't contain them if
+    the user edited GOAL/tasks but didn't commit before running. Pointing at the root
+    copies makes the session see the source-of-truth contract either way."""
+    prompt = build_prompt("/s/dir", "/p/task-001.md", "/w/tree", "task-001",
+                          "/root/GOAL.md", "/root/CLAUDE.md")
+    assert "/root/GOAL.md" in prompt and "/root/CLAUDE.md" in prompt
+    assert "in this worktree" not in prompt
 
 
 def test_new_session_id_unique_and_prefixed():
@@ -63,7 +75,8 @@ def test_spawn_invokes_claude_with_expected_argv(git_repo, monkeypatch, stub_pgi
     # stable prefix: claude -p <prompt> --model <model>, then the permission posture flags
     assert captured["argv"][:5] == [
         "claude", "-p",
-        build_prompt(str(rs.sdir), str(task.path), str(rs.worktree), "task-001"),
+        build_prompt(str(rs.sdir), str(task.path), str(rs.worktree), "task-001",
+                     str(paths.goal_file), str(paths.claude_md)),
         "--model", "test-model",
     ]
     assert "--add-dir" in captured["argv"]          # posture flags follow the prefix
