@@ -47,14 +47,22 @@ def new_session_id() -> str:
     return f"sess-{stamp}-{uuid.uuid4().hex[:8]}"
 
 
-def build_prompt(sdir: str, task_file: str, wt: str, tid: str) -> str:
+def build_prompt(sdir: str, task_file: str, wt: str, tid: str,
+                 goal_file: str, claude_md: str) -> str:
+    # GOAL.md / CLAUDE.md are referenced by their ROOT absolute paths, not "in this
+    # worktree": a worktree forked from the committed HEAD won't contain them if the
+    # user edited GOAL/tasks but hadn't committed before running. The root copies are the
+    # source of truth and are always present, so the session sees its contract either way.
+    # (The task file is likewise an absolute path.) Code changes still happen in the worktree.
     return (
         f"You are an autobuild session. Your session directory is: {sdir}\n"
         f"Your assigned task file is: {task_file}\n"
         f"You are working inside an isolated git worktree at: {wt}\n\n"
-        "Read GOAL.md and CLAUDE.md in this worktree for your contract, then follow\n"
-        f"plan -> review -> implement and finish by writing {sdir}/result.json.\n"
-        f"Work ONLY on task {tid}. Do everything from within {wt}.\n"
+        f"Read your contract and the project's north star:\n"
+        f"  - CLAUDE.md (your contract): {claude_md}\n"
+        f"  - GOAL.md (the north star):  {goal_file}\n"
+        f"then follow plan -> review -> implement and finish by writing {sdir}/result.json.\n"
+        f"Work ONLY on task {tid}. Make all code changes from within {wt}.\n"
     )
 
 
@@ -296,7 +304,8 @@ def spawn_session(task: Task, config: Config, paths: Paths) -> RunningSession:
     _atomic_write_json(sdir / "meta.json", meta)
     set_status(task.path, "in-progress")
 
-    prompt = build_prompt(str(sdir), str(task.path), str(wt), tid)
+    prompt = build_prompt(str(sdir), str(task.path), str(wt), tid,
+                          str(paths.goal_file), str(paths.claude_md))
     out = open(sdir / "session.out", "w")
     err = open(sdir / "session.err", "w")
     try:
