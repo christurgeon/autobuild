@@ -249,16 +249,57 @@ def file_followups(result: dict, sdir: Path, paths: Paths) -> list[str]:
 
 # --- reaper ------------------------------------------------------------------
 
+class _ReapLockBusy(RuntimeError):
+    """Another process holds this session's reap lock (it's reaping it now)."""
+
+
+@contextlib.contextmanager
+def _session_reap_lock(sdir: Path):
+    """Exclusive, NON-BLOCKING per-session lock around a reap. Raises _ReapLockBusy if
+    another process is already reaping this session (so we skip it — it's being handled).
+    fcntl.flock auto-releases on close and on holder death, so a crashed reaper strands
+    nothing (the next pass reaps) — unlike an O_EXCL marker, which would lose the work."""
+    f = open(sdir / ".reap.lock", "w")
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        f.close()
+        raise _ReapLockBusy(str(sdir)) from e
+    try:
+        yield
+    finally:
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        f.close()
+
+
 def reap_session(sdir: Path, config: Config, paths: Paths) -> bool:
-    """Reap one finished session from its result.json sentinel. Idempotent: a
-    reaped.json marker guards against double-integration / double follow-up filing.
-    Returns True if it acted, False if skipped or not finished."""
+    """Reap one finished session from its result.json sentinel. Idempotent AND
+    concurrency-safe: the reaped.json marker guards re-runs, and a per-session
+    NON-BLOCKING flock serializes a `run` and a concurrent `reap` so only one integrates
+    (no duplicate PRs / follow-ups). Returns True if it acted, False if skipped/not finished.
+    NOTE: the lock closes the *concurrent* double-integration; a crash *mid-integrate*
+    (push ok, then death before the marker) is not covered — `integrate` isn't idempotent
+    across a crash. That's a separate concern (out of scope here)."""
     if (sdir / "reaped.json").exists():
-        return False
+        return False  # fast path (best-effort): already reaped
     result = _read_json(sdir / "result.json")
     if result is None:
-        return False  # not finished, or corrupt -> leave for clean
+        return False  # not finished, or corrupt -> leave for clean (no lock needed)
+    try:
+        with _session_reap_lock(sdir):
+            # Re-check UNDER the lock: a concurrent reaper may have finished between the
+            # fast-path check above and our acquiring the lock. THIS is the real
+            # idempotency guard — keep it here in reap_session, not in _session_reap_lock.
+            if (sdir / "reaped.json").exists():
+                return False
+            return _reap_session_locked(sdir, result, config, paths)
+    except _ReapLockBusy:
+        return False  # another process is reaping this session right now — it's handled
 
+
+def _reap_session_locked(sdir: Path, result: dict, config: Config, paths: Paths) -> bool:
+    """The reap body, run while holding the session's reap lock and after confirming
+    reaped.json is absent. `result` is the already-parsed result.json."""
     tid = str(result.get("task", ""))
     status = str(result.get("status", ""))
     sid = sdir.name
