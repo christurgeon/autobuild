@@ -1,5 +1,4 @@
-"""Task model + frontmatter I/O. Ports fm/set_status/count_status and the
-follow-up id allocation from common.sh + loop.sh.
+"""Task model + frontmatter I/O, plus follow-up id allocation.
 
 Reads use PyYAML (so `depends_on` is a real list, not a literal string). Writes
 of the `status:` field are surgical — a single-line regex rewrite that preserves
@@ -93,13 +92,6 @@ def is_terminal(status: str) -> bool:
     return status in TERMINAL
 
 
-def count_by_status(tasks: list[Task]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for t in tasks:
-        counts[t.status] = counts.get(t.status, 0) + 1
-    return counts
-
-
 # ---- writing status (surgical + atomic) ------------------------------------
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -113,7 +105,7 @@ def _atomic_write(path: Path, text: str) -> None:
             os.unlink(tmp)
 
 
-def set_status(path: Path, new_status: str, *, preserve_comment: bool = True) -> None:
+def set_status(path: Path, new_status: str) -> None:
     """Rewrite only the `status:` value in the frontmatter, preserving everything
     else (comments, key order, body) byte-for-byte."""
     text = path.read_text(encoding="utf-8")
@@ -123,7 +115,7 @@ def set_status(path: Path, new_status: str, *, preserve_comment: bool = True) ->
     fm = m.group(1)
 
     def repl(mm: re.Match) -> str:
-        comment = mm.group("comment") if (preserve_comment and mm.group("comment")) else ""
+        comment = mm.group("comment") or ""
         return f"{mm.group('pre')}{new_status}{comment}"
 
     new_fm, n = _STATUS_LINE_RE.subn(repl, fm, count=1)

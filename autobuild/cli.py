@@ -1,4 +1,4 @@
-"""CLI entry point. Ports bin/autobuild: init, run, status, reap, clean."""
+"""CLI entry point: the `autobuild` command (init, run, status, reap, clean)."""
 
 from __future__ import annotations
 

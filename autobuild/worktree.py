@@ -1,5 +1,4 @@
-"""Worktree management — each session gets its own isolated checkout + branch.
-Ports worktree.sh."""
+"""Worktree management — each session gets its own isolated checkout + branch."""
 
 from __future__ import annotations
 
