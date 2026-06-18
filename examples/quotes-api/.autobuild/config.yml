@@ -1,0 +1,24 @@
+# autobuild configuration for the quotes-api example.
+# (Trimmed to the keys this example sets; every other key falls back to its
+# documented default — see autobuild/templates/config.yml for the full reference.)
+
+model: claude-opus-4-8
+max_parallel: 3               # task-003 and task-004 can run at once
+base_branch: main
+max_iterations: 50
+
+integration: pr               # open a PR per finished task for review
+
+checks:                       # re-run by the reaper before anything lands
+  - "ruff check ."
+  - "pytest -q"
+verify_checks: true
+
+# Permission posture: this example assumes you run inside a disposable sandbox VM.
+# If you don't, tighten these (see the security section of the top-level README).
+dangerously_bypass_permissions: true
+require_sandbox_for_bypass: false
+
+session_max_turns: 40
+task_timeout_seconds: 1800
+kill_grace_seconds: 10
