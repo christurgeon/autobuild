@@ -936,3 +936,69 @@ def test_reaped_json_written_atomically(git_repo, monkeypatch):
     reap_session(sdir, Config(integration="branch"), paths)
     assert any(c.endswith("reaped.json") for c in calls)
     assert json.loads((sdir / "reaped.json").read_text())["status"] == "BLOCKED"
+
+
+# ---- audit I-1: per-session reap lock (no double-integration) ---------------
+
+def test_reap_skipped_while_another_holds_lock(git_repo):
+    """A concurrent reaper holding the per-session lock makes reap_session skip (no-op):
+    it returns False and touches nothing — status, result.json, reaped.json all unchanged."""
+    import fcntl
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    sdir = make_session(paths, "task-001", "COMPLETE")
+    held = open(sdir / ".reap.lock", "w")
+    fcntl.flock(held.fileno(), fcntl.LOCK_EX)            # stand in for a concurrent reaper
+    try:
+        assert reap_session(sdir, Config(integration="branch"), paths) is False
+        assert read_task(paths.tasks_dir / "task-001.md").status == "in-progress"  # no-op
+        assert not (sdir / "reaped.json").exists()
+        assert (sdir / "result.json").exists()           # result untouched
+    finally:
+        fcntl.flock(held.fileno(), fcntl.LOCK_UN)
+        held.close()
+
+
+def test_reap_rechecks_reaped_json_under_lock(git_repo, monkeypatch):
+    """If a concurrent reaper finished between our fast-path check and the lock, the
+    UNDER-LOCK re-check catches it: no second integration / follow-up."""
+    import contextlib as _ctx
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    sdir = make_session(paths, "task-001", "COMPLETE",
+                        followups=[{"title": "x", "priority": 2}])
+
+    @_ctx.contextmanager
+    def winner_finished(sd):
+        (sd / "reaped.json").write_text("{}")            # a winner that finished in the gap
+        yield
+
+    monkeypatch.setattr(loop_mod, "_session_reap_lock", winner_finished)
+    assert reap_session(sdir, Config(integration="branch"), paths) is False
+    assert [p.name for p in paths.tasks_dir.glob("*.md")] == ["task-001.md"]  # no follow-up
+
+
+def test_reap_recovers_after_lock_holder_is_killed(git_repo):
+    """Crash safety: a SIGKILL'd lock holder auto-releases the flock, so the next reap
+    succeeds — the headline property of using flock over a persistent marker."""
+    import subprocess
+    import sys
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    sdir = make_session(paths, "task-001", "COMPLETE")
+    lock, ready = sdir / ".reap.lock", sdir / ".held"
+    child = subprocess.Popen([sys.executable, "-c",
+        "import fcntl,time;"
+        f"f=open({str(lock)!r},'w');fcntl.flock(f.fileno(),fcntl.LOCK_EX);"
+        f"open({str(ready)!r},'w').close();time.sleep(60)"])
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists()
+        assert reap_session(sdir, Config(integration="branch"), paths) is False  # held -> skip
+    finally:
+        child.kill()
+        child.wait()                                     # SIGKILL -> kernel releases the flock
+    assert reap_session(sdir, Config(integration="branch"), paths) is True       # now reaps
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"
