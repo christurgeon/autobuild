@@ -25,7 +25,12 @@ from shutil import which
 from .config import Config
 from .paths import Paths
 from .scheduler import backlog_lock, claim_tasks, runnable_tasks, stuck_tasks
-from .session import RunningSession, spawn_session, write_sentinel_if_absent
+from .session import (
+    RunningSession,
+    _atomic_write_json,
+    spawn_session,
+    write_sentinel_if_absent,
+)
 from .tasks import (
     create_task_file,
     is_terminal,
@@ -64,7 +69,7 @@ def _read_json(path: Path) -> dict | None:
     except OSError:
         return None
     try:
-        return json.loads(text)
+        obj = json.loads(text)
     except ValueError:
         # Tolerate trailing data after a valid JSON object — agents sometimes append
         # stray output (e.g. a closing tag) after the sentinel. Salvage the leading
@@ -75,7 +80,10 @@ def _read_json(path: Path) -> dict | None:
             obj, _ = json.JSONDecoder().raw_decode(text.lstrip())
         except ValueError:
             return None
-        return obj if isinstance(obj, dict) else None
+    # Return only a JSON *object* (dict). A non-dict sentinel (`[]`, `"x"`, `5`) is not a
+    # usable result; returning it would let callers that do `.get()` (reap_session,
+    # collect_status) crash — a single poisoned file would wedge run/reap/status.
+    return obj if isinstance(obj, dict) else None
 
 
 def _classify_sentinel(sdir: Path) -> str:
@@ -144,17 +152,25 @@ def integrate(tid: str, config: Config, paths: Paths) -> tuple[bool, str]:
         return True, f"left branch {branch} for manual merge"
 
     if mode == "pr":
-        if which("gh"):
-            _git(root, "push", "-u", "origin", branch)
-            r = subprocess.run(
-                ["gh", "pr", "create", "--head", branch, "--base", base,
-                 "--title", f"autobuild: {tid}", "--body", f"Automated by autobuild for {tid}."],
-                cwd=str(root), capture_output=True, text=True,
-            )
-            if r.returncode == 0:
-                return True, f"opened PR for {branch}"
-            return True, f"PR creation failed for {branch}; branch left for manual PR"
-        return True, f"gh not found; left branch {branch} for manual PR"
+        if not which("gh"):
+            return True, f"gh not found; left branch {branch} for manual PR"
+        push = _git(root, "push", "-u", "origin", branch)
+        if push.returncode != 0:
+            # Push failed (no remote / auth): nothing reached the remote, so there is no PR.
+            # The local branch is still the deliverable downstream tasks merge, so the task
+            # stays done — but say so accurately instead of the misleading "PR creation
+            # failed" (which implies the branch was pushed). Check remote/auth to get a PR.
+            return True, f"push failed for {branch}; kept locally, no PR opened (check remote/auth)"
+        r = subprocess.run(
+            ["gh", "pr", "create", "--head", branch, "--base", base,
+             "--title", f"autobuild: {tid}", "--body", f"Automated by autobuild for {tid}."],
+            cwd=str(root), capture_output=True, text=True,
+        )
+        if r.returncode == 0:
+            return True, f"opened PR for {branch}"
+        # Branch IS pushed (visible on the remote); only the PR-open step failed -> a human
+        # can open it from the pushed branch, so the work landed: done.
+        return True, f"PR creation failed for {branch}; pushed branch left for manual PR"
 
     if mode == "auto-merge":
         r = _git(root, "merge", "--no-ff", "-m", f"autobuild: merge {tid}", branch)
@@ -293,11 +309,9 @@ def reap_session(sdir: Path, config: Config, paths: Paths) -> bool:
         return False
 
     remove_worktree(paths, sid)
-    (sdir / "reaped.json").write_text(json.dumps(
-        {"reaped_at": _now(), "status": status, "integrated": integrated,
-         "checks": checks_outcome, "followups": followups},
-        indent=2,
-    ), encoding="utf-8")
+    _atomic_write_json(sdir / "reaped.json",
+                       {"reaped_at": _now(), "status": status, "integrated": integrated,
+                        "checks": checks_outcome, "followups": followups})
     return True
 
 
@@ -337,8 +351,8 @@ def _kill_group(rs: RunningSession, grace: float) -> None:
     except subprocess.TimeoutExpired:
         pass
     _signal_session(rs, signal.SIGKILL)
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        proc.wait(timeout=grace)  # reap the zombie
+    proc.wait()  # SIGKILL is uncatchable; wait unbounded so the child is always reaped
+    #              (a bounded wait could time out and leak a zombie the loop won't reclaim)
 
 
 def reap_stalled(running: list[RunningSession], paths: Paths) -> None:
@@ -448,6 +462,10 @@ def _harvest(running: list[RunningSession], config: Config, paths: Paths) -> lis
                 _kill_group(rs, config.kill_grace_seconds)
                 if _classify_sentinel(rs.sdir) == "reapable":
                     continue  # finished during grace — reap_all takes the COMPLETE
+                # Note the deliberate asymmetry: an absent/corrupt result under a *killed*
+                # session is TIMEOUT (retryable), whereas the same shape from a process
+                # that exited ON ITS OWN (the branch below) is terminal BLOCKED — a killed
+                # agent's torn/missing write shouldn't be held against it as a hard failure.
                 write_sentinel_if_absent(
                     rs.sdir, rs.tid, "TIMEOUT",
                     f"session exceeded task_timeout_seconds "
@@ -621,11 +639,27 @@ def status(paths: Paths, config: Config) -> dict:
 # --- clean -------------------------------------------------------------------
 
 def clean(paths: Paths) -> None:
-    log("cleaning finished worktrees and reaped sessions")
+    """Remove reaped sessions and prune detached worktrees — but only when no run is
+    active. Taking the run lock is what makes deletion safe: without it, clean could
+    rmtree a live session's worktree or a COMPLETE-but-unreaped session (losing the
+    result). Refuses (and warns) rather than racing a live run."""
+    paths.ensure_runtime_dirs()
+    try:
+        with run_lock(paths.run_lock):
+            _clean_locked(paths)
+    except RunLockHeld:
+        warn("an 'autobuild run' is active (holds run.lock); skipping clean so it can't "
+             "delete live sessions or prune their worktrees")
+
+
+def _clean_locked(paths: Paths) -> None:
+    log("cleaning reaped sessions and pruning detached worktrees")
     prune_worktrees(paths)
     if paths.sessions_dir.is_dir():
         import shutil
         for sdir in sorted(paths.sessions_dir.iterdir()):
-            if sdir.is_dir() and ((sdir / "reaped.json").exists() or (sdir / "result.json").exists()):
+            # Only `reaped.json` means truly finished. A bare `result.json` can be a
+            # COMPLETE session the reaper hasn't integrated yet — deleting it loses work.
+            if sdir.is_dir() and (sdir / "reaped.json").exists():
                 shutil.rmtree(sdir, ignore_errors=True)
     ok("clean")

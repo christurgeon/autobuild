@@ -839,3 +839,100 @@ def test_next_wait_caps_at_nearest_deadline():
 def test_next_wait_uses_sleep_when_no_deadlines():
     rs = RunningSession("s", "t", None, None, None, None, deadline=None)
     assert loop_mod._next_wait([rs], sleep_seconds=2.0, now=0.0) == 2.0
+
+
+# ---- audit C-1: a non-dict result.json must never crash run/reap/status -----
+
+NON_DICT_RESULTS = {"empty-list": "[]", "list-str": '["x"]', "string": '"s"', "number": "5"}
+
+
+@pytest.mark.parametrize("shape", sorted(NON_DICT_RESULTS))
+def test_read_json_non_dict_is_none(git_repo, shape):
+    paths = setup(git_repo)
+    sdir = paths.sessions_dir / "s"
+    sdir.mkdir(parents=True)
+    (sdir / "result.json").write_text(NON_DICT_RESULTS[shape])
+    assert loop_mod._read_json(sdir / "result.json") is None
+
+
+@pytest.mark.parametrize("shape", sorted(NON_DICT_RESULTS))
+def test_reap_session_tolerates_non_dict_result(git_repo, shape):
+    paths = setup(git_repo)
+    sdir = paths.sessions_dir / "sess-x"
+    sdir.mkdir(parents=True)
+    (sdir / "result.json").write_text(NON_DICT_RESULTS[shape])
+    assert reap_session(sdir, Config(integration="branch"), paths) is False  # no crash
+
+
+def test_collect_status_tolerates_non_dict_result(git_repo):
+    paths = setup(git_repo)
+    sdir = paths.sessions_dir / "sess-x"
+    sdir.mkdir(parents=True)
+    (sdir / "result.json").write_text('["x"]')
+    report = collect_status(paths)                       # must not raise
+    assert any(s["session"] == "sess-x" for s in report["sessions"])
+
+
+def test_run_survives_poisoned_sentinel(git_repo):
+    """A non-dict result.json must not crash run() at startup (reconcile -> reap_all)."""
+    paths = setup(git_repo)
+    sdir = paths.sessions_dir / "sess-poison"
+    sdir.mkdir(parents=True)
+    (sdir / "result.json").write_text('["x"]')
+    loop_mod.run(paths, Config(integration="branch"), sleep_seconds=0)  # must return, not crash
+
+
+# ---- audit I-4: pr mode must not mark done when push fails ------------------
+
+def test_pr_mode_push_failure_keeps_done_with_clear_message(git_repo, monkeypatch):
+    """pr mode without a reachable remote: the local branch is still the deliverable that
+    downstream tasks merge, so the task stays `done` — but the detail must say no PR was
+    opened (not the misleading 'PR creation failed', which implies the branch was pushed)."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    make_worktree(paths, "sess-task-001", "task-001", "main")
+    monkeypatch.setattr(loop_mod, "which", lambda name: "/usr/bin/gh")   # pretend gh present
+    # git_repo has no 'origin' remote -> push fails before gh is even invoked
+    success, detail = loop_mod.integrate("task-001", Config(integration="pr"), paths)
+    assert success is True                                   # branch is the deliverable
+    assert "push failed" in detail and "no pr" in detail.lower()
+
+
+# ---- audit I-5: clean must be lock-aware and keep unreaped results ----------
+
+def test_clean_only_removes_reaped_sessions(git_repo):
+    paths = setup(git_repo)
+    reaped = paths.sessions_dir / "sess-done"
+    reaped.mkdir(parents=True)
+    (reaped / "reaped.json").write_text("{}")
+    unreaped = paths.sessions_dir / "sess-live"
+    unreaped.mkdir(parents=True)
+    (unreaped / "result.json").write_text(json.dumps({"task": "t", "status": "COMPLETE"}))
+    loop_mod.clean(paths)
+    assert not reaped.exists()        # reaped -> removed
+    assert unreaped.exists()          # unreaped COMPLETE -> preserved (used to be destroyed)
+
+
+def test_clean_skips_when_run_active(git_repo):
+    paths = setup(git_repo)
+    s = paths.sessions_dir / "sess-done"
+    s.mkdir(parents=True)
+    (s / "reaped.json").write_text("{}")
+    with loop_mod.run_lock(paths.run_lock):        # simulate an active run holding the lock
+        loop_mod.clean(paths)
+    assert s.exists()                 # clean refused under the lock
+
+
+# ---- audit I-6: reaped.json is written atomically --------------------------
+
+def test_reaped_json_written_atomically(git_repo, monkeypatch):
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    sdir = make_session(paths, "task-001", "BLOCKED")
+    calls = []
+    real = loop_mod._atomic_write_json
+    monkeypatch.setattr(loop_mod, "_atomic_write_json",
+                        lambda path, payload: (calls.append(str(path)), real(path, payload))[1])
+    reap_session(sdir, Config(integration="branch"), paths)
+    assert any(c.endswith("reaped.json") for c in calls)
+    assert json.loads((sdir / "reaped.json").read_text())["status"] == "BLOCKED"
