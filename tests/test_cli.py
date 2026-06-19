@@ -1,6 +1,7 @@
 import importlib.resources as ir
 
 import pytest
+import yaml
 
 from autobuild import cli
 from autobuild import loop as loop_mod
@@ -12,6 +13,11 @@ def template(*parts):
     for p in parts:
         t = t / p
     return t.read_text(encoding="utf-8")
+
+
+def packaged_skills():
+    root = ir.files("autobuild") / "templates" / "skills"
+    return [s for s in root.iterdir() if s.is_dir()]
 
 
 def test_init_lays_down_templates_byte_identical(tmp_path, monkeypatch):
@@ -31,6 +37,41 @@ def test_init_is_idempotent_and_preserves_edits(tmp_path, monkeypatch):
     Paths(tmp_path).goal_file.write_text("MY EDITED GOAL\n")
     cli.main(["init"])  # second init must not clobber
     assert Paths(tmp_path).goal_file.read_text() == "MY EDITED GOAL\n"
+
+
+def test_init_installs_skills_byte_identical(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["init"]) == 0
+    skills_dir = Paths(tmp_path).skills_dir
+    expected = {s.name for s in packaged_skills()}
+    assert expected, "no skills are packaged under templates/skills/"
+    installed = {p.name for p in skills_dir.iterdir() if p.is_dir()}
+    assert expected <= installed
+    for s in packaged_skills():
+        got = (skills_dir / s.name / "SKILL.md").read_text()
+        assert got == (s / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_init_skills_idempotent_and_preserves_edits(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.main(["init"])
+    skill_md = Paths(tmp_path).skills_dir / packaged_skills()[0].name / "SKILL.md"
+    skill_md.write_text("EDITED SKILL\n")
+    cli.main(["init"])  # second init must not clobber an edited skill
+    assert skill_md.read_text() == "EDITED SKILL\n"
+
+
+def test_packaged_skills_have_valid_frontmatter():
+    skills = packaged_skills()
+    assert skills, "no skills are packaged under templates/skills/"
+    for s in skills:
+        text = (s / "SKILL.md").read_text(encoding="utf-8")
+        assert text.startswith("---\n"), f"{s.name} missing frontmatter"
+        _, frontmatter, _ = text.split("---\n", 2)
+        meta = yaml.safe_load(frontmatter)
+        assert meta["name"] == s.name, f"{s.name} name/dir mismatch: {meta.get('name')}"
+        assert s.name.startswith("autobuild-"), f"{s.name} not namespaced 'autobuild-'"
+        assert meta.get("description"), f"{s.name} missing description"
 
 
 def test_status_runs_from_fresh_init(tmp_path, monkeypatch, capsys):

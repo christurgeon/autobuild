@@ -9,13 +9,17 @@ backlog of tasks toward a `GOAL.md` by spawning fresh, isolated Claude Code sess
 (`claude -p`) in parallel git worktrees. Read `README.md` for the full mental model.
 
 **Critical distinction:** the files under `autobuild/templates/` (`autobuild/templates/CLAUDE.md`,
-`autobuild/templates/GOAL.md`, `autobuild/templates/tasks/`, `autobuild/templates/config.yml`)
-are *scaffolding copied into a user's target project* by `autobuild init` (read out of the
-installed package via `importlib.resources`). They are **not** instructions for developing
-autobuild itself. In particular, `autobuild/templates/CLAUDE.md` is the **runtime contract a
-spawned session obeys** (plan → review → implement → write `result.json`). Editing it changes
-how *target-project sessions* behave, not how you work on this codebase. This root file is the
-only one that governs work on the harness. (`examples/quotes-api/` is likewise *sample
+`autobuild/templates/GOAL.md`, `autobuild/templates/tasks/`, `autobuild/templates/config.yml`,
+`autobuild/templates/skills/`) are *scaffolding copied into a user's target project* by
+`autobuild init` (read out of the installed package via `importlib.resources`). They are
+**not** instructions for developing autobuild itself. In particular, `autobuild/templates/CLAUDE.md`
+is the **runtime contract a spawned session obeys** (plan → review → implement → write
+`result.json`). Editing it changes how *target-project sessions* behave, not how you work on this
+codebase. `autobuild/templates/skills/` are likewise target-project artifacts: Claude Code Skills
+(`autobuild-author-goal`, `autobuild-plan-backlog`, `autobuild-configure`, `autobuild-triage`)
+installed into the user's `.claude/skills/` to help a *human* author and operate a backlog
+interactively — each carries a guard so a spawned single-task session won't invoke it. This root
+file is the only one that governs work on the harness. (`examples/quotes-api/` is likewise *sample
 target-project data* — a worked backlog the README links to — not guidance for developing the
 harness.)
 
@@ -62,7 +66,9 @@ or `yq`. The three I/O layers everything else builds on:
 Module responsibilities:
 
 - **`autobuild/cli.py`** — `argparse` dispatch + the `autobuild` entry point. `ab_init` copies
-  the packaged templates into the project; `require_init` guards the other commands.
+  the packaged templates into the project and installs the bundled skills under `.claude/skills/`
+  (`_install_skills` / `_copy_resource_tree`, copy-if-absent so re-running init never clobbers a
+  user's edits); `require_init` guards the other commands.
 - **`autobuild/config.py`** — load `.autobuild/config.yml` into a typed, frozen `Config`
   (all keys optional; defaults match the template). Values are **validated at load**: every
   problem is aggregated into one `ConfigError` so a bad config (`integration: prr`,
