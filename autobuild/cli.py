@@ -36,8 +36,37 @@ def ab_init(paths: Paths) -> int:
     if not paths.config_file.exists():
         paths.config_file.write_text((tpl / "config.yml").read_text(encoding="utf-8"), encoding="utf-8")
 
+    _install_skills(tpl / "skills", paths.skills_dir)
+
     ok("ready. Edit GOAL.md and tasks/, then run: autobuild run")
     return 0
+
+
+def _install_skills(src, skills_dir) -> None:
+    """Copy the packaged authoring/operating skills into the project's .claude/skills/.
+
+    Each skill dir is copied only if it does not already exist, so re-running init is a
+    no-op and a user's edited/installed skill is never clobbered (mirrors how GOAL.md and
+    CLAUDE.md are guarded)."""
+    if not src.is_dir():
+        return
+    for skill in src.iterdir():
+        if not skill.is_dir():
+            continue
+        dest = skills_dir / skill.name
+        if dest.exists():
+            continue
+        _copy_resource_tree(skill, dest)
+
+
+def _copy_resource_tree(src, dest) -> None:
+    dest.mkdir(parents=True, exist_ok=True)
+    for child in src.iterdir():
+        target = dest / child.name
+        if child.is_dir():
+            _copy_resource_tree(child, target)
+        else:
+            target.write_text(child.read_text(encoding="utf-8"), encoding="utf-8")
 
 
 def require_init(paths: Paths) -> None:

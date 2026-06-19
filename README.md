@@ -104,11 +104,28 @@ autobuild status         # see task + session state at any time
 > is a complete worked example — a `GOAL.md` plus six tasks with a real dependency graph — that
 > you can read or copy into a fresh repo (see [`examples/README.md`](examples/README.md)).
 
+## Authoring skills
+
+The hard part of autobuild isn't the loop — it's writing a good `GOAL.md`, decomposing it into
+right-sized, dependency-ordered tasks, and picking a safe config. So `autobuild init` also installs
+four **Claude Code Skills** into your project's `.claude/skills/`. Run Claude Code interactively in
+your project and these trigger on what you ask:
+
+| Skill | Use it to |
+|---|---|
+| `autobuild-author-goal` | Interview you, then write a tight, testable `GOAL.md`. |
+| `autobuild-plan-backlog` | Turn the GOAL into a DAG of right-sized `tasks/*.md` with checkable acceptance criteria. |
+| `autobuild-configure` | Tailor `.autobuild/config.yml` — checks, integration mode, and the security posture. |
+| `autobuild-triage` | After a run settles, explain *why* tasks blocked or timed out and propose re-queues/fixes. |
+
+They're for the **human** setting up and operating a backlog — each carries a guard so a spawned
+single-task session never invokes one. Re-running `autobuild init` won't clobber a skill you've edited.
+
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `autobuild init` | Copy `GOAL.md`, `CLAUDE.md`, `tasks/`, and `.autobuild/config.yml` into the current project. |
+| `autobuild init` | Copy `GOAL.md`, `CLAUDE.md`, `tasks/`, and `.autobuild/config.yml` into the current project, and install the [authoring/operating skills](#authoring-skills) under `.claude/skills/`. |
 | `autobuild run` | Run the outer loop: schedule → spawn sessions in worktrees → reap. Repeats until done. |
 | `autobuild status` | Print every task's status and any in-flight sessions. |
 | `autobuild reap` | One-shot: collect finished sessions, update tasks, open PRs / merge per config. |

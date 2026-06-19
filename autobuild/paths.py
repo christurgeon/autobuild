@@ -55,6 +55,10 @@ class Paths:
     def claude_md(self) -> Path:
         return self.root / "CLAUDE.md"
 
+    @property
+    def skills_dir(self) -> Path:
+        return self.root / ".claude" / "skills"
+
     def ensure_runtime_dirs(self) -> None:
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.worktrees_dir.mkdir(parents=True, exist_ok=True)
