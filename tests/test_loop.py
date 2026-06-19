@@ -804,7 +804,7 @@ def test_timeout_reap_is_idempotent(git_repo):
 # ---- timeout auto-retry: re-queue while budget remains, then exhaust ---------
 
 def test_timeout_requeues_and_discards_partial_branch(git_repo, git):
-    """With retries remaining (default timeout_max_retries=1), a first timeout re-queues
+    """With retries remaining (default timeout_max_retries=2), a first timeout re-queues
     the task to `todo`, records the attempt in the ledger, and force-deletes the partial
     branch so the retry re-forks fresh from base."""
     paths = setup(git_repo)
@@ -830,7 +830,9 @@ def test_timeout_exhausts_after_budget_and_clears_ledger(git_repo):
     add_task(paths, "task-001", status="in-progress")
     record_timeout(paths.retries_ledger, "task-001", "sess-earlier")     # 1 attempt already
     sdir = make_session(paths, "task-001", "TIMEOUT")
-    assert reap_session(sdir, Config(integration="branch"), paths) is True
+    # Pin the budget to 1 so the arithmetic stays valid independent of the default:
+    # one prior attempt + this one = 2 > 1 -> exhausted (matches "-> 2 total" above).
+    assert reap_session(sdir, Config(integration="branch", timeout_max_retries=1), paths) is True
     assert read_task(paths.tasks_dir / "task-001.md").status == "timeout"  # terminal
     assert retry_count(paths.retries_ledger, "task-001") == 0              # cleared
 

@@ -120,7 +120,7 @@ autobuild status         # see task + session state at any time
 model: claude-opus-4-8        # passed to `claude --model`
 max_parallel: 3               # WIP limit / number of concurrent worktrees
 base_branch: main             # what feature branches fork from and merge into
-max_iterations: 50            # global safety stop for the outer loop
+max_iterations: 100           # global safety stop for the outer loop
 
 integration: pr               # pr | auto-merge | branch
                               #   pr        -> open a PR per finished task (default)
@@ -143,10 +143,10 @@ dangerously_bypass_permissions: true  # DEFAULT: full --dangerously-skip-permiss
 require_sandbox_for_bypass: false     # ... with no AUTOBUILD_SANDBOX gate (see warning below)
 permission_mode: acceptEdits  # used only when bypass is OFF: plan|default|acceptEdits|bypassPermissions
 allowed_tools: [Edit, Write, Read]   # (fenced mode) + Bash(git:*) and one Bash(<check>:*) per check
-session_max_turns: 40         # --max-turns cap per session (int >= 1)
-task_timeout_seconds: 1800    # per-session wall budget, monotonic (int >= 1)
-kill_grace_seconds: 10        # SIGTERM -> wait -> SIGKILL grace (int >= 1)
-timeout_max_retries: 1        # auto-retries for a timed-out task before it's left
+session_max_turns: 80         # --max-turns cap per session (int >= 1)
+task_timeout_seconds: 3600    # per-session wall budget, monotonic (int >= 1)
+kill_grace_seconds: 20        # SIGTERM -> wait -> SIGKILL grace (int >= 1)
+timeout_max_retries: 2        # auto-retries for a timed-out task before it's left
                               # terminal `timeout` (int >= 0; 0 = block on the first
                               # timeout). Each retry re-spends task_timeout_seconds.
 ```
