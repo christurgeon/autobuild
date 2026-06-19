@@ -7,6 +7,7 @@ from autobuild.tasks import (
     DEFAULT_PRIORITY,
     Task,
     create_task_file,
+    is_terminal,
     iter_tasks,
     next_task_id,
     parse_frontmatter,
@@ -15,6 +16,18 @@ from autobuild.tasks import (
     slugify,
     task_index,
 )
+
+
+@pytest.mark.parametrize("status,terminal", [
+    ("done", True),
+    ("blocked", True),
+    ("timeout", True),       # retries exhausted -> a terminal resting state
+    ("todo", False),
+    ("claimed", False),
+    ("in-progress", False),
+])
+def test_is_terminal(status, terminal):
+    assert is_terminal(status) is terminal
 
 TEMPLATE_TASK = """\
 ---

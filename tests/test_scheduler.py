@@ -177,13 +177,15 @@ def test_concurrent_claims_never_double_claim(tmp_path):
     assert all(t.status == "claimed" for t in iter_tasks(paths.tasks_dir))
 
 
-# ---- task-105: timeout is a non-terminal dead end until retry (106) ---------
+# ---- timeout is a TERMINAL state (retries exhausted); dependents still blocked --
 
-def test_timeout_task_reported_stuck(tmp_path):
+def test_timeout_task_is_terminal_not_stuck(tmp_path):
+    # timeout now means "retries exhausted" — a terminal cause of stuckness for
+    # dependents, never itself reported as stuck (like blocked/done).
     from autobuild.scheduler import stuck_tasks
     from autobuild.tasks import Task
     t = Task("task-001", "t", "timeout", 1, [], tmp_path / "task-001.md")
-    assert stuck_tasks([t], {"task-001": t})["task-001"].startswith("timed-out")
+    assert stuck_tasks([t], {"task-001": t}) == {}
 
 
 def test_dependent_of_timeout_reported(tmp_path):

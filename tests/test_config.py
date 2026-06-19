@@ -312,6 +312,37 @@ def test_timeout_keys_aggregate(tmp_path):
     assert "task_timeout_seconds" in joined and "kill_grace_seconds" in joined
 
 
+# --- timeout auto-retry: timeout_max_retries (min 0, unlike the other ints) --
+
+def test_timeout_max_retries_defaults_to_one(tmp_path):
+    assert load_config(tmp_path / "nope.yml").timeout_max_retries == 1
+
+
+def test_timeout_max_retries_zero_is_allowed(tmp_path):
+    # 0 = "block on the first timeout" — a legitimate value the >= 1 ints reject.
+    cfg = load_config(_write(tmp_path, "timeout_max_retries: 0\n"))
+    assert cfg.timeout_max_retries == 0
+
+
+def test_timeout_max_retries_negative_raises(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, "timeout_max_retries: -1\n"))
+    assert "timeout_max_retries" in str(e.value)
+
+
+def test_timeout_max_retries_non_int_raises(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, "timeout_max_retries: lots\n"))
+    assert "timeout_max_retries" in str(e.value)
+
+
+def test_timeout_max_retries_bool_raises(tmp_path):
+    # bool is an int subclass; must be rejected like the other int knobs
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, "timeout_max_retries: true\n"))
+    assert "timeout_max_retries" in str(e.value)
+
+
 def test_config_error_names_path(tmp_path):
     p = _write(tmp_path, "integration: nope\n")
     with pytest.raises(ConfigError) as e:

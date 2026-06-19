@@ -51,3 +51,6 @@ session_max_turns: 40         # integer >= 1: --max-turns cap per session
 # --- per-session timeout -----------------------------------------------------
 task_timeout_seconds: 1800    # integer >= 1: per-session wall budget (monotonic)
 kill_grace_seconds: 10        # integer >= 1 (no 0-grace): SIGTERM -> wait -> SIGKILL
+timeout_max_retries: 1        # integer >= 0: auto-retries for a timed-out task before it's
+                              # left terminal `timeout` (0 = block on the first timeout).
+                              # Each retry re-spends task_timeout_seconds above.

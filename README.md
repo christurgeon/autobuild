@@ -58,7 +58,8 @@ The loop, step by step:
    config.
 4. A failed check or a `BLOCKED` sentinel leaves the branch intact and blocks the task. A
    session that blows its `task_timeout_seconds` deadline has its whole process group killed
-   and its task marked `timeout` for retry.
+   and is **automatically retried on a fresh branch** up to `timeout_max_retries` times; once
+   that budget is spent the task is left in a terminal `timeout` state for you to triage.
 5. Repeat until the backlog is drained or a stop condition trips.
 
 ## What a run looks like
@@ -145,6 +146,9 @@ allowed_tools: [Edit, Write, Read]   # (fenced mode) + Bash(git:*) and one Bash(
 session_max_turns: 40         # --max-turns cap per session (int >= 1)
 task_timeout_seconds: 1800    # per-session wall budget, monotonic (int >= 1)
 kill_grace_seconds: 10        # SIGTERM -> wait -> SIGKILL grace (int >= 1)
+timeout_max_retries: 1        # auto-retries for a timed-out task before it's left
+                              # terminal `timeout` (int >= 0; 0 = block on the first
+                              # timeout). Each retry re-spends task_timeout_seconds.
 ```
 
 ## Security posture (read before running unattended)

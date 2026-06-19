@@ -72,8 +72,10 @@ def stuck_tasks(tasks: list[Task], index: dict[str, Task]) -> dict[str, str]:
         if task.status == "blocked":
             return f"blocked-dependency: {tid}"
         if task.status == "timeout":
-            # non-terminal, but cannot reach `done` on its own until it is retried
-            return f"timed-out-dependency: {tid}" if path else "timed-out: awaiting retry"
+            # terminal (retries exhausted) and never `done` — a dependency that strands
+            # its dependents, reported distinctly from a `blocked` dep. (Only reached
+            # transitively: a terminal timeout task is filtered out at the top level.)
+            return f"timed-out-dependency: {tid}"
         path.append(tid)
         try:
             for dep in task.depends_on:

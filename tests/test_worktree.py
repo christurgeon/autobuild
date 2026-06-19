@@ -5,10 +5,16 @@ from autobuild.worktree import (
     DependencyMergeConflict,
     DependencyMergeError,
     branch_name,
+    delete_branch,
     make_worktree,
     prune_worktrees,
     remove_worktree,
 )
+
+
+def _branch_present(git, repo, tid):
+    return git(repo, "show-ref", "--verify", "--quiet",
+               f"refs/heads/{branch_name(tid)}", check=False).returncode == 0
 
 
 def _dep_branch(git, repo, tmp_path, tid, base, filename, content):
@@ -62,6 +68,34 @@ def test_remove_worktree_keeps_branch_and_commits(git_repo, git):
 def test_remove_missing_worktree_is_noop(git_repo):
     paths = Paths(git_repo)
     remove_worktree(paths, "never-made")  # must not raise
+
+
+# ---- delete_branch: safe (-d) vs force (-D) for timeout re-queue ------------
+
+def test_delete_branch_force_removes_unmerged(git_repo, git, tmp_path):
+    """A timed-out branch carries unmerged commits; force-delete (-D) must drop it so a
+    retry re-forks fresh from base, and report the branch gone."""
+    paths = Paths(git_repo)
+    _dep_branch(git, git_repo, tmp_path, "task-001", "main", "f.txt", "partial")
+    assert _branch_present(git, git_repo, "task-001")
+    assert delete_branch(paths, "task-001", force=True) is True
+    assert not _branch_present(git, git_repo, "task-001")
+
+
+def test_delete_branch_safe_refuses_unmerged(git_repo, git, tmp_path):
+    """The default safe delete (-d) must REFUSE an unmerged branch (returns False, branch
+    survives) — the guard that keeps an un-integrated deliverable from being lost."""
+    paths = Paths(git_repo)
+    _dep_branch(git, git_repo, tmp_path, "task-001", "main", "f.txt", "partial")
+    assert delete_branch(paths, "task-001", force=False) is False
+    assert _branch_present(git, git_repo, "task-001")
+
+
+def test_delete_branch_absent_is_gone(git_repo):
+    """Force-delete is idempotent: an already-absent branch reports gone (True), so the
+    requeue path can treat 'branch deleted' and 'branch never existed' alike."""
+    paths = Paths(git_repo)
+    assert delete_branch(paths, "task-001", force=True) is True
 
 
 def test_prune_worktrees_runs(git_repo):

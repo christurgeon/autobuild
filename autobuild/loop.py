@@ -24,7 +24,8 @@ from shutil import which
 
 from .config import Config
 from .paths import Paths
-from .scheduler import backlog_lock, claim_tasks, stuck_tasks
+from .retries import clear_retries, record_timeout
+from .scheduler import backlog_lock, claim_tasks, runnable_tasks, stuck_tasks
 from .session import (
     RunningSession,
     _atomic_write_json,
@@ -37,6 +38,7 @@ from .tasks import (
     is_terminal,
     iter_tasks,
     next_task_id,
+    read_task,
     set_status,
     task_index,
 )
@@ -288,6 +290,46 @@ def reap_session(sdir: Path, config: Config, paths: Paths) -> bool:
         return False  # another process is reaping this session right now — it's handled
 
 
+def _handle_timeout(tid: str, sid: str, task, config: Config, paths: Paths) -> bool:
+    """Decide a timed-out task's fate under the backlog lock — atomic against claim_tasks
+    and a concurrent reap. Returns True iff the task was re-queued for another attempt.
+
+    Guarded on the task still being `in-progress` (re-read under the lock): if a concurrent
+    run already moved it on, this reap was superseded — record nothing, change nothing.
+    Otherwise record this timeout (a set of session-ids, so re-recording is idempotent) and
+    branch on the distinct-attempt count:
+      - within timeout_max_retries -> force-delete the partial branch (fresh base) and
+        re-queue to `todo`; the same run re-claims it next pass;
+      - exhausted -> leave the task terminal `timeout` and clear its ledger entry, so a
+        later manual re-open starts with a fresh budget.
+    A partial branch that won't delete (degenerate worktree state) makes us give up
+    terminally rather than retry onto surviving partial work."""
+    def give_up(reason: str) -> bool:
+        set_status(task.path, "timeout")
+        clear_retries(paths.retries_ledger, tid)
+        warn(f"{sid}: {tid} TIMEOUT — {reason}; left terminal (timeout)")
+        return False
+
+    with backlog_lock(paths.lock_file):
+        if read_task(task.path).status != "in-progress":
+            return False  # superseded by a concurrent run — nothing to do
+        count = record_timeout(paths.retries_ledger, tid, sid)  # distinct attempts so far
+        if count > config.timeout_max_retries:
+            return give_up(f"retries exhausted ({config.timeout_max_retries})")
+        remove_worktree(paths, sid)  # free the branch from its worktree before -D
+        if not delete_branch(paths, tid, force=True):
+            # The branch outlived its worktree removal (a genuine git failure, not a
+            # checkout pin) — don't re-queue onto surviving partial work; the worktree is
+            # already gone, so point the human at the branch to delete by hand.
+            return give_up(f"could not delete {branch_name(tid)} for a clean retry — "
+                           f"delete it by hand to allow a retry")
+        set_status(task.path, "todo")
+        warn(f"{sid}: {tid} TIMEOUT — re-queued (attempt {count}/"
+             f"{config.timeout_max_retries + 1}); discarded partial {branch_name(tid)}, "
+             f"re-forking from base")
+        return True
+
+
 def _reap_session_locked(sdir: Path, result: dict, config: Config, paths: Paths) -> bool:
     """The reap body, run while holding the session's reap lock and after confirming
     reaped.json is absent. `result` is the already-parsed result.json."""
@@ -296,6 +338,7 @@ def _reap_session_locked(sdir: Path, result: dict, config: Config, paths: Paths)
     sid = sdir.name
     task = task_index(paths.tasks_dir).get(tid)
     integrated = False
+    requeued = False
     followups: list[str] = []
     checks_outcome = "n/a"
 
@@ -331,11 +374,15 @@ def _reap_session_locked(sdir: Path, result: dict, config: Config, paths: Paths)
             set_status(task.path, "blocked")
         warn(f"{sid}: {tid} NEEDS_HUMAN — see {sdir / 'result.json'}")
     elif status == "TIMEOUT":
-        # A killed-past-deadline session: a distinct, retryable status. NEVER integrated
-        # or verified (its tree is incomplete), and no follow-ups filed.
+        # A killed-past-deadline session: NEVER integrated or verified (its tree is
+        # incomplete), and no follow-ups filed. Re-queue for another attempt or, once the
+        # budget is spent, leave the task terminal `timeout` (decided under the backlog lock).
         if task:
-            set_status(task.path, "timeout")
-        warn(f"{sid}: {tid} TIMEOUT — killed past deadline (awaiting retry)")
+            requeued = _handle_timeout(tid, sid, task, config, paths)
+        else:
+            # No task file (deleted/renamed mid-flight) — still reaped by the shared tail,
+            # but log it so a timed-out session never vanishes without a diagnostic.
+            warn(f"{sid}: {tid} TIMEOUT — task file not found; reaped without retry")
     else:
         warn(f"{sid}: unrecognized status '{status}'")
         return False
@@ -344,12 +391,13 @@ def _reap_session_locked(sdir: Path, result: dict, config: Config, paths: Paths)
     # Under auto-merge the branch's commits now live on base_branch via the merge commit,
     # so the autobuild/<tid> branch is redundant — delete it (safely) instead of letting it
     # accumulate. Other modes keep the branch: it is the deliverable (pr/branch) and a
-    # dependent may still need it to layer (the commits live nowhere else).
+    # dependent may still need it to layer (the commits live nowhere else). A re-queued
+    # timeout already force-deleted its branch in _handle_timeout (fresh base).
     if integrated and config.integration == "auto-merge":
         delete_branch(paths, tid)
     _atomic_write_json(sdir / "reaped.json",
                        {"reaped_at": _now(), "status": status, "integrated": integrated,
-                        "checks": checks_outcome, "followups": followups})
+                        "requeued": requeued, "checks": checks_outcome, "followups": followups})
     return True
 
 
@@ -627,6 +675,14 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float) -> None:
 
         if not running:
             tasks = iter_tasks(paths.tasks_dir)
+            index = {t.id: t for t in tasks}
+            # A reap in this pass can create newly-runnable work with nothing left running
+            # to trigger the next claim — most notably a timeout RE-QUEUE flipping a task
+            # back to `todo`. Loop back and claim it instead of settling prematurely (which
+            # would strand the retry). Only while we're still allowed to start work: over
+            # budget we stop claiming and report below.
+            if not over_budget and runnable_tasks(tasks, index):
+                continue
             pending = [t for t in tasks if not is_terminal(t.status)]
             if over_budget and pending:
                 # Budget spent with work still left: report the cap accurately instead of
@@ -637,7 +693,7 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float) -> None:
             elif not pending:
                 ok("backlog drained — COMPLETE")
             else:
-                stuck = stuck_tasks(tasks, {t.id: t for t in tasks})
+                stuck = stuck_tasks(tasks, index)
                 if stuck:
                     warn(f"backlog settled: {len(stuck)} task(s) cannot proceed:")
                     for tid in sorted(stuck):
