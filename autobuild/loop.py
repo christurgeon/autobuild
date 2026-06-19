@@ -304,28 +304,30 @@ def _handle_timeout(tid: str, sid: str, task, config: Config, paths: Paths) -> b
         later manual re-open starts with a fresh budget.
     A partial branch that won't delete (degenerate worktree state) makes us give up
     terminally rather than retry onto surviving partial work."""
+    def give_up(reason: str) -> bool:
+        set_status(task.path, "timeout")
+        clear_retries(paths.retries_ledger, tid)
+        warn(f"{sid}: {tid} TIMEOUT — {reason}; left terminal (timeout)")
+        return False
+
     with backlog_lock(paths.lock_file):
         if read_task(task.path).status != "in-progress":
             return False  # superseded by a concurrent run — nothing to do
         count = record_timeout(paths.retries_ledger, tid, sid)  # distinct attempts so far
-        if count <= config.timeout_max_retries:
-            remove_worktree(paths, sid)  # free the branch from its worktree before -D
-            if delete_branch(paths, tid, force=True):
-                set_status(task.path, "todo")
-                warn(f"{sid}: {tid} TIMEOUT — re-queued (attempt {count}/"
-                     f"{config.timeout_max_retries + 1}); discarded partial "
-                     f"{branch_name(tid)}, re-forking from base")
-                return True
-            set_status(task.path, "timeout")
-            clear_retries(paths.retries_ledger, tid)
-            warn(f"{sid}: {tid} TIMEOUT — could not delete {branch_name(tid)} for a clean "
-                 f"retry; left terminal (timeout) — inspect the branch/worktree")
-            return False
-        set_status(task.path, "timeout")
-        clear_retries(paths.retries_ledger, tid)
-        warn(f"{sid}: {tid} TIMEOUT — retries exhausted "
-             f"({config.timeout_max_retries}); left terminal (timeout)")
-        return False
+        if count > config.timeout_max_retries:
+            return give_up(f"retries exhausted ({config.timeout_max_retries})")
+        remove_worktree(paths, sid)  # free the branch from its worktree before -D
+        if not delete_branch(paths, tid, force=True):
+            # The branch outlived its worktree removal (a genuine git failure, not a
+            # checkout pin) — don't re-queue onto surviving partial work; the worktree is
+            # already gone, so point the human at the branch to delete by hand.
+            return give_up(f"could not delete {branch_name(tid)} for a clean retry — "
+                           f"delete it by hand to allow a retry")
+        set_status(task.path, "todo")
+        warn(f"{sid}: {tid} TIMEOUT — re-queued (attempt {count}/"
+             f"{config.timeout_max_retries + 1}); discarded partial {branch_name(tid)}, "
+             f"re-forking from base")
+        return True
 
 
 def _reap_session_locked(sdir: Path, result: dict, config: Config, paths: Paths) -> bool:
@@ -377,6 +379,10 @@ def _reap_session_locked(sdir: Path, result: dict, config: Config, paths: Paths)
         # budget is spent, leave the task terminal `timeout` (decided under the backlog lock).
         if task:
             requeued = _handle_timeout(tid, sid, task, config, paths)
+        else:
+            # No task file (deleted/renamed mid-flight) — still reaped by the shared tail,
+            # but log it so a timed-out session never vanishes without a diagnostic.
+            warn(f"{sid}: {tid} TIMEOUT — task file not found; reaped without retry")
     else:
         warn(f"{sid}: unrecognized status '{status}'")
         return False

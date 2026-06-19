@@ -907,6 +907,21 @@ def test_timeout_requeue_aborts_when_branch_undeletable(git_repo, monkeypatch):
     assert retry_count(paths.retries_ledger, "task-001") == 0               # ledger cleared
 
 
+def test_timeout_for_missing_task_is_logged_not_silent(git_repo, capsys):
+    """A TIMEOUT whose task file was deleted/renamed mid-flight is still reaped, but must
+    not vanish silently — an operator watching the run needs a diagnostic line."""
+    paths = setup(git_repo)
+    sdir = paths.sessions_dir / "sess-task-001"          # no tasks/task-001.md exists
+    sdir.mkdir(parents=True)
+    (sdir / "meta.json").write_text(json.dumps({"task": "task-001", "branch": "autobuild/task-001"}))
+    (sdir / "result.json").write_text(json.dumps({"task": "task-001", "status": "TIMEOUT",
+                                                  "summary": "killed"}))
+    assert reap_session(sdir, Config(integration="branch"), paths) is True
+    assert (sdir / "reaped.json").exists()               # still reaped (idempotent)
+    out = capsys.readouterr().out
+    assert "task-001" in out and "TIMEOUT" in out        # not silent
+
+
 def test_run_retries_timeout_then_settles(git_repo, stub_bin):
     """End-to-end through run(): a session that always times out is re-queued once
     (timeout_max_retries=1), respawned, times out again, then settles terminal `timeout`
