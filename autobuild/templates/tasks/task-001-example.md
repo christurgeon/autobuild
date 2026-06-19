@@ -1,7 +1,7 @@
 ---
 id: task-001
 title: Example task — replace me
-status: todo          # todo | claimed | in-progress | review | done | blocked
+status: todo          # todo | claimed | in-progress | review | done | blocked (harness also sets: timeout)
 priority: 1           # lower number = higher priority
 depends_on: []        # list of task ids that must be `done` first, e.g. [task-000]
 ---

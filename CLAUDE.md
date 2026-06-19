@@ -122,9 +122,12 @@ This is the part that requires reading multiple files to understand:
    fail, blocks the task and keeps the branch instead of integrating (trust, but verify). If they
    pass it **integrates** (`integrate` → `pr` via `gh` / `auto-merge` / `branch`) and only then
    `set_status`es the task `done` — so a failed auto-merge leaves the task `blocked`, not falsely
-   `done`. `BLOCKED`/`NEEDS_HUMAN` set the task `blocked`; a synthetic `TIMEOUT` sets it `timeout`
-   (never integrated or verified — its tree is incomplete — and no follow-ups filed). It files any
-   `followups[]` as new `tasks/*.md` (ids allocated under the backlog lock),
+   `done`. `BLOCKED`/`NEEDS_HUMAN` set the task `blocked`; a synthetic `TIMEOUT` is never integrated
+   or verified (its tree is incomplete) and files no follow-ups — instead, under the backlog lock,
+   `_handle_timeout` either **re-queues** the task to `todo` (force-deleting the partial branch so
+   the retry re-forks from base) while its attempt count is within `timeout_max_retries`, or once
+   the budget is spent leaves it terminal `timeout` and clears its ledger entry. For `COMPLETE` it
+   files any `followups[]` as new `tasks/*.md` (ids allocated under the backlog lock),
    removes the worktree, and drops a `reaped.json` marker. That marker makes the reaper
    **idempotent**: a second pass over the same session is a no-op.
 5. Three safety nets catch sessions that don't end cleanly. In-loop, `_harvest` never drops a
@@ -143,14 +146,18 @@ progress it blocks on the next live session finishing instead of busy-sleeping.
 
 ### Task status state machine
 
-`todo` → `claimed` → `in-progress` → terminal (`done` | `blocked`). A session killed past its
-deadline lands the task in `timeout` — **non-terminal**: it is never integrated or verified and
-awaits a retry (automatic re-queue of timed-out tasks is not yet implemented; until then it sits, and a dependent sees a
-`timed-out-dependency` blocker via `stuck_tasks`). `done` and `blocked` remain the only terminal
-states (`is_terminal` / the `TERMINAL` set); everything else (including `timeout`) counts as
-in-flight, which is what keeps the loop running. The template task file documents the human
-vocabulary `todo | claimed | in-progress | review | done | blocked`; the harness also applies
-`timeout`.
+`todo` → `claimed` → `in-progress` → terminal (`done` | `blocked` | `timeout`). A session killed
+past its deadline is, under the backlog lock, either **re-queued** to `todo` for another attempt
+(its partial `autobuild/<tid>` branch force-deleted so the retry re-forks from base) or — once its
+distinct-attempt count in the `.autobuild/retries.json` ledger exceeds `timeout_max_retries` — left
+in terminal `timeout`: a settled failure kept distinct from `blocked` so a human can tell "ran out
+of time" from "agent hit a wall". A dependent of a terminal `timeout` task sees a
+`timed-out-dependency` blocker via `stuck_tasks`. `done`, `blocked`, and `timeout` are the terminal
+states (`is_terminal` / the `TERMINAL` set); everything else counts as in-flight, which is what
+keeps the loop running. (Because a re-queue creates newly-runnable work mid-`_harvest`, the loop's
+settle check yields back to claiming when `runnable_tasks` is non-empty rather than terminating on
+"nothing running" alone.) The template task file documents the human vocabulary
+`todo | claimed | in-progress | review | done | blocked`; the harness also applies `timeout`.
 
 ## Conventions and gotchas
 

@@ -38,6 +38,9 @@ class Config:
     # --- per-session timeout plumbing ----------------------------------------
     task_timeout_seconds: int = 1800  # int >= 1; monotonic per-session deadline
     kill_grace_seconds: int = 10      # int >= 1; SIGTERM -> wait -> SIGKILL
+    timeout_max_retries: int = 1      # int >= 0; auto-retries for a timed-out task
+                                      # (0 = block on first timeout). Each retry
+                                      # re-spends task_timeout_seconds.
 
 
 # Top-level keys autobuild understands. Anything else is a likely typo and warned.
@@ -85,15 +88,15 @@ def load_config(path: Path) -> Config:
     defaults = Config()
     problems: list[str] = []
 
-    def want_int(key: str, default: int) -> int:
+    def want_int(key: str, default: int, *, minimum: int = 1) -> int:
         if key not in data:
             return default
         v = data[key]
         if isinstance(v, bool) or not isinstance(v, int):
-            problems.append(f"{key} must be an integer >= 1 (got {v!r})")
+            problems.append(f"{key} must be an integer >= {minimum} (got {v!r})")
             return default
-        if v < 1:
-            problems.append(f"{key} must be >= 1 (got {v})")
+        if v < minimum:
+            problems.append(f"{key} must be >= {minimum} (got {v})")
             return default
         return v
 
@@ -165,6 +168,8 @@ def load_config(path: Path) -> Config:
         "require_sandbox_for_bypass", defaults.require_sandbox_for_bypass)
     task_timeout_seconds = want_int("task_timeout_seconds", defaults.task_timeout_seconds)
     kill_grace_seconds = want_int("kill_grace_seconds", defaults.kill_grace_seconds)
+    timeout_max_retries = want_int("timeout_max_retries", defaults.timeout_max_retries,
+                                   minimum=0)
 
     if problems:
         raise ConfigError(problems, path)
@@ -185,4 +190,5 @@ def load_config(path: Path) -> Config:
         require_sandbox_for_bypass=require_sandbox_for_bypass,
         task_timeout_seconds=task_timeout_seconds,
         kill_grace_seconds=kill_grace_seconds,
+        timeout_max_retries=timeout_max_retries,
     )

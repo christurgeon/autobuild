@@ -17,9 +17,10 @@ from autobuild.loop import (
     status,
 )
 from autobuild.paths import Paths
+from autobuild.retries import record_timeout, retry_count
 from autobuild.session import RunningSession, spawn_session
 from autobuild.tasks import read_task
-from autobuild.worktree import make_worktree
+from autobuild.worktree import branch_name, make_worktree
 
 
 def _spawn_real(paths, stub_bin, tid="task-001", **env):
@@ -755,14 +756,14 @@ def test_finish_during_grace_beats_timeout(git_repo, stub_bin):
 
 
 def test_hung_past_deadline_times_out(git_repo, stub_bin):
-    """Child ignores SIGTERM, never writes -> SIGKILL -> TIMEOUT sentinel; task `timeout`,
-    not blocked/done; no zombie."""
+    """Child ignores SIGTERM, never writes -> SIGKILL -> TIMEOUT sentinel; with no retry
+    budget (timeout_max_retries=0) the task is terminal `timeout`, not blocked/done; no zombie."""
     paths = setup(git_repo)
     rs = _spawn_real(paths, stub_bin, STUB_SLEEP="30", STUB_IGNORE_SIGTERM="1")
     _await_ready(rs.sdir)
     rs.deadline = time.monotonic() - 1
-    survivors = loop_mod._harvest([rs], Config(integration="branch",
-                                               kill_grace_seconds=1), paths)
+    survivors = loop_mod._harvest([rs], Config(integration="branch", kill_grace_seconds=1,
+                                               timeout_max_retries=0), paths)
     assert survivors == []
     assert rs.proc.poll() is not None                          # reaped, no zombie
     assert read_task(paths.tasks_dir / "task-001.md").status == "timeout"
@@ -782,7 +783,8 @@ def test_timeout_never_integrates(git_repo, git):
                                                 "branch": "autobuild/task-001"}))
     (sdir / "result.json").write_text(json.dumps({"task": "task-001", "status": "TIMEOUT",
                                                   "summary": "killed"}))
-    assert reap_session(sdir, Config(integration="auto-merge"), paths) is True
+    # no retry budget -> terminal timeout, and never integrated even with a real branch+commit
+    assert reap_session(sdir, Config(integration="auto-merge", timeout_max_retries=0), paths) is True
     assert "w" not in git(git_repo, "log", "--oneline", "main").stdout   # NOT merged
     assert read_task(paths.tasks_dir / "task-001.md").status == "timeout"
     assert json.loads((sdir / "reaped.json").read_text())["status"] == "TIMEOUT"
@@ -793,9 +795,132 @@ def test_timeout_reap_is_idempotent(git_repo):
     paths = setup(git_repo)
     add_task(paths, "task-001")
     sdir = make_session(paths, "task-001", "TIMEOUT")
+    cfg = Config(integration="branch", timeout_max_retries=0)   # exhausted -> terminal
+    assert reap_session(sdir, cfg, paths) is True
+    assert reap_session(sdir, cfg, paths) is False
+    assert read_task(paths.tasks_dir / "task-001.md").status == "timeout"
+
+
+# ---- timeout auto-retry: re-queue while budget remains, then exhaust ---------
+
+def test_timeout_requeues_and_discards_partial_branch(git_repo, git):
+    """With retries remaining (default timeout_max_retries=1), a first timeout re-queues
+    the task to `todo`, records the attempt in the ledger, and force-deletes the partial
+    branch so the retry re-forks fresh from base."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    wt = make_worktree(paths, "sess-task-001", "task-001", "main")
+    (wt / "partial.txt").write_text("half-done")               # an unmerged partial commit
+    git(wt, "add", "-A")
+    git(wt, "commit", "-q", "-m", "partial work")
+    sdir = make_session(paths, "task-001", "TIMEOUT")
+    assert reap_session(sdir, Config(integration="branch"), paths) is True
+    assert read_task(paths.tasks_dir / "task-001.md").status == "todo"   # re-queued
+    assert not _branch_exists(git, git_repo, "task-001")                 # fresh base
+    assert retry_count(paths.retries_ledger, "task-001") == 1
+    reaped = json.loads((sdir / "reaped.json").read_text())
+    assert reaped["status"] == "TIMEOUT" and reaped["requeued"] is True
+
+
+def test_timeout_exhausts_after_budget_and_clears_ledger(git_repo):
+    """Once a prior timeout has been recorded, the next timeout exhausts the budget
+    (timeout_max_retries=1 -> 2 total): terminal `timeout`, ledger entry cleared so a
+    later manual re-open starts fresh."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    record_timeout(paths.retries_ledger, "task-001", "sess-earlier")     # 1 attempt already
+    sdir = make_session(paths, "task-001", "TIMEOUT")
+    assert reap_session(sdir, Config(integration="branch"), paths) is True
+    assert read_task(paths.tasks_dir / "task-001.md").status == "timeout"  # terminal
+    assert retry_count(paths.retries_ledger, "task-001") == 0              # cleared
+
+
+def test_timeout_zero_budget_blocks_on_first(git_repo):
+    """timeout_max_retries=0 -> a single timeout is terminal immediately, no re-queue."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    sdir = make_session(paths, "task-001", "TIMEOUT")
+    reap_session(sdir, Config(integration="branch", timeout_max_retries=0), paths)
+    assert read_task(paths.tasks_dir / "task-001.md").status == "timeout"
+    assert retry_count(paths.retries_ledger, "task-001") == 0
+
+
+def test_timeout_requeue_is_idempotent(git_repo, git):
+    """Re-reaping a re-queued session is a no-op: the reaped.json guard holds and the
+    ledger count does not inflate (the session-id set is idempotent)."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    make_worktree(paths, "sess-task-001", "task-001", "main")
+    sdir = make_session(paths, "task-001", "TIMEOUT")
     assert reap_session(sdir, Config(integration="branch"), paths) is True
     assert reap_session(sdir, Config(integration="branch"), paths) is False
-    assert read_task(paths.tasks_dir / "task-001.md").status == "timeout"
+    assert read_task(paths.tasks_dir / "task-001.md").status == "todo"
+    assert retry_count(paths.retries_ledger, "task-001") == 1
+
+
+def test_timeout_reap_skips_transition_when_not_in_progress(git_repo):
+    """Guard: if the task is no longer `in-progress` when a TIMEOUT session is reaped
+    (a concurrent run already moved it on), the reap records the marker but does not
+    clobber the task's status or touch the ledger."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="todo")           # already moved on
+    sdir = make_session(paths, "task-001", "TIMEOUT")
+    assert reap_session(sdir, Config(integration="branch"), paths) is True
+    assert read_task(paths.tasks_dir / "task-001.md").status == "todo"   # unchanged
+    assert retry_count(paths.retries_ledger, "task-001") == 0
+    assert (sdir / "reaped.json").exists()
+
+
+def test_reconcile_preserves_retry_budget(git_repo):
+    """Crash recovery must NOT reset the budget: a startup reconcile leaves the ledger
+    intact, so a task that already burned a retry before the crash can't refill it."""
+    paths = setup(git_repo)
+    record_timeout(paths.retries_ledger, "task-001", "sess-before-crash")
+    reconcile(paths, sweep_in_progress=True)
+    assert retry_count(paths.retries_ledger, "task-001") == 1
+
+
+def test_clean_does_not_reset_retry_budget(git_repo):
+    """`clean` removes reaped session dirs but must leave the ledger — the property that
+    makes a ledger correct where session-derived counting silently refilled the budget."""
+    paths = setup(git_repo)
+    record_timeout(paths.retries_ledger, "task-001", "sess-old")
+    reaped = paths.sessions_dir / "sess-old"
+    reaped.mkdir(parents=True)
+    (reaped / "reaped.json").write_text("{}")
+    loop_mod.clean(paths)
+    assert not reaped.exists()                                   # session dir gone
+    assert retry_count(paths.retries_ledger, "task-001") == 1    # budget survives
+
+
+def test_timeout_requeue_aborts_when_branch_undeletable(git_repo, monkeypatch):
+    """If the partial branch can't be force-deleted (a degenerate worktree still pins it),
+    the reaper must NOT re-queue onto surviving partial work — it gives up terminally so a
+    human inspects, rather than silently resuming a half-done tree."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    make_worktree(paths, "sess-task-001", "task-001", "main")
+    sdir = make_session(paths, "task-001", "TIMEOUT")
+    monkeypatch.setattr(loop_mod, "delete_branch", lambda *a, **k: False)   # delete fails
+    reap_session(sdir, Config(integration="branch"), paths)                 # default retries=1
+    assert read_task(paths.tasks_dir / "task-001.md").status == "timeout"   # terminal, not todo
+    assert retry_count(paths.retries_ledger, "task-001") == 0               # ledger cleared
+
+
+def test_run_retries_timeout_then_settles(git_repo, stub_bin):
+    """End-to-end through run(): a session that always times out is re-queued once
+    (timeout_max_retries=1), respawned, times out again, then settles terminal `timeout`
+    — proving the re-queue actually re-runs the task and the loop drains, not spins."""
+    paths = setup(git_repo)
+    stub_bin(STUB_SLEEP="30")                  # the session never finishes on its own
+    add_task(paths, "task-001", status="todo")
+    cfg = Config(claude_cmd="claude", integration="branch", max_iterations=10,
+                 task_timeout_seconds=1, kill_grace_seconds=1, timeout_max_retries=1)
+    loop_mod.run(paths, cfg, sleep_seconds=0.05)
+    assert read_task(paths.tasks_dir / "task-001.md").status == "timeout"   # exhausted -> terminal
+    sessions = [d for d in paths.sessions_dir.iterdir() if d.is_dir()]
+    assert len(sessions) >= 2                                                # respawned at least once
+    assert retry_count(paths.retries_ledger, "task-001") == 0                # cleared on terminal
 
 
 def test_one_dead_group_does_not_abort_harvest_of_others(git_repo):
@@ -820,7 +945,7 @@ def test_one_dead_group_does_not_abort_harvest_of_others(git_repo):
 
 
 def test_run_settles_with_parked_timeout_task(git_repo):
-    """A parked `timeout` task (non-terminal, not todo) must let the loop settle, not
+    """A terminal `timeout` task (retries exhausted) lets the loop settle cleanly, not
     spin to max_iterations."""
     paths = setup(git_repo)
     add_task(paths, "task-001", status="timeout")

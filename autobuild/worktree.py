@@ -126,19 +126,29 @@ def prune_worktrees(paths: Paths) -> None:
     _git(paths.root, "worktree", "prune", check=False)
 
 
-def delete_branch(paths: Paths, tid: str) -> bool:
-    """Delete the task's autobuild/<tid> branch with `git branch -d` (SAFE delete: git
-    refuses a branch not fully merged into the checked-out base_branch). Returns True if it
-    was removed.
+def delete_branch(paths: Paths, tid: str, *, force: bool = False) -> bool:
+    """Delete the task's autobuild/<tid> branch. Returns True iff the branch is gone
+    afterward (deleted now, or already absent — idempotent).
 
-    Called after an auto-merge integration, where the branch's commits already live on
-    base_branch via the --no-ff merge commit, so the branch is redundant and would
-    otherwise pile up. It is a no-op (returns False) if the branch is already gone or git
-    refuses it — never a force-delete, so a not-yet-integrated deliverable branch (pr /
-    branch mode, or a blocked task) is always safe. A still-pending dependent is fine too:
-    it forks from base_branch (which carries the dep) and _merge_dependencies skips the
-    now-absent branch."""
+    Two modes:
+
+    - `force=False` (default) — SAFE delete (`git branch -d`): git refuses a branch not
+      fully merged into the checked-out base_branch, so this returns False (branch kept)
+      for an un-integrated deliverable. Called after an auto-merge integration, where the
+      branch's commits already live on base_branch via the --no-ff merge commit, so the
+      branch is redundant and would otherwise pile up. A still-pending dependent is fine:
+      it forks from base_branch (which carries the dep) and _merge_dependencies skips the
+      now-absent branch.
+
+    - `force=True` — FORCE delete (`git branch -D`). The ONLY legitimate use is a timeout
+      re-queue, where autobuild deliberately discards the killed session's incomplete,
+      unverified partial branch so the retry re-forks fresh from base_branch. Never use
+      `force=True` on a `pr`/`branch`-mode deliverable or a non-timeout task — it bypasses
+      the merged-into-base safety check `-d` provides."""
     branch = branch_name(tid)
     if not _branch_exists(paths.root, branch):
-        return False
-    return _git(paths.root, "branch", "-d", branch, check=False).returncode == 0
+        return True  # already gone — the desired end-state for both callers
+    flag = "-D" if force else "-d"
+    if _git(paths.root, "branch", flag, branch, check=False).returncode == 0:
+        return True
+    return not _branch_exists(paths.root, branch)

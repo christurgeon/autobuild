@@ -17,7 +17,10 @@ from pathlib import Path
 import yaml
 
 DEFAULT_PRIORITY = 999  # missing/invalid priority sorts last; never silently promoted
-TERMINAL = frozenset({"done", "blocked"})
+# Terminal resting states. `timeout` is terminal too: it means a timed-out task that
+# has exhausted its automatic retries (timeout_max_retries) — a settled failure, distinct
+# from `blocked` so a human can tell "ran out of time" from "agent hit a wall".
+TERMINAL = frozenset({"done", "blocked", "timeout"})
 
 # frontmatter is the leading `---\n ... \n---\n` block; group(1) is its body.
 _FM_RE = re.compile(r"\A---\n(.*?\n)---\n", re.DOTALL)
