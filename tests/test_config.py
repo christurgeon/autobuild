@@ -11,7 +11,7 @@ TEMPLATE_CONFIG = """\
 model: claude-opus-4-8        # passed to `claude --model`
 max_parallel: 3               # WIP limit / number of concurrent worktrees
 base_branch: main             # feature branches fork from and merge into this
-max_iterations: 50            # global safety stop for the outer loop
+max_iterations: 100           # global safety stop for the outer loop
 
 integration: pr
 
@@ -30,7 +30,7 @@ def test_defaults_when_file_missing(tmp_path):
     assert cfg.model == "claude-opus-4-8"
     assert cfg.max_parallel == 3
     assert cfg.base_branch == "main"
-    assert cfg.max_iterations == 50
+    assert cfg.max_iterations == 100
     assert cfg.integration == "pr"
     assert cfg.checks == []
     assert cfg.verify_checks is True
@@ -49,7 +49,7 @@ def test_parses_template_config(tmp_path):
     cfg = load_config(p)
     assert cfg.model == "claude-opus-4-8"
     assert cfg.max_parallel == 3 and isinstance(cfg.max_parallel, int)
-    assert cfg.max_iterations == 50 and isinstance(cfg.max_iterations, int)
+    assert cfg.max_iterations == 100 and isinstance(cfg.max_iterations, int)
     assert cfg.integration == "pr"
     assert cfg.verify_checks is True
     assert cfg.claude_cmd == "claude"
@@ -211,7 +211,7 @@ def test_permission_posture_defaults(tmp_path):
     # default is maximally permissive: full bypass, no sandbox gate (operator's choice)
     assert cfg.permission_mode == "acceptEdits"  # the fallback when bypass is turned off
     assert cfg.allowed_tools == ["Edit", "Write", "Read"]
-    assert cfg.session_max_turns == 40
+    assert cfg.session_max_turns == 80
     assert cfg.dangerously_bypass_permissions is True
     assert cfg.require_sandbox_for_bypass is False
 
@@ -289,8 +289,8 @@ def test_aggregates_permission_problems_into_one_error(tmp_path):
 
 def test_timeout_defaults(tmp_path):
     cfg = load_config(tmp_path / "nope.yml")
-    assert cfg.task_timeout_seconds == 1800
-    assert cfg.kill_grace_seconds == 10
+    assert cfg.task_timeout_seconds == 3600
+    assert cfg.kill_grace_seconds == 20
 
 
 def test_task_timeout_seconds_zero_raises(tmp_path):
@@ -314,8 +314,8 @@ def test_timeout_keys_aggregate(tmp_path):
 
 # --- timeout auto-retry: timeout_max_retries (min 0, unlike the other ints) --
 
-def test_timeout_max_retries_defaults_to_one(tmp_path):
-    assert load_config(tmp_path / "nope.yml").timeout_max_retries == 1
+def test_timeout_max_retries_defaults_to_two(tmp_path):
+    assert load_config(tmp_path / "nope.yml").timeout_max_retries == 2
 
 
 def test_timeout_max_retries_zero_is_allowed(tmp_path):

@@ -21,7 +21,7 @@ class Config:
     model: str = "claude-opus-4-8"
     max_parallel: int = 3
     base_branch: str = "main"
-    max_iterations: int = 50
+    max_iterations: int = 100
     integration: str = "pr"  # pr | auto-merge | branch
     checks: list[str] = field(default_factory=list)
     verify_checks: bool = True  # re-run checks in the reaper before integrating
@@ -32,13 +32,13 @@ class Config:
     # credentials + network) is the operator's to accept — see the README security note.
     permission_mode: str = "acceptEdits"  # the fallback posture when bypass is turned off
     allowed_tools: list[str] = field(default_factory=lambda: ["Edit", "Write", "Read"])
-    session_max_turns: int = 40  # --max-turns; int >= 1
+    session_max_turns: int = 80  # --max-turns; int >= 1
     dangerously_bypass_permissions: bool = True  # => --dangerously-skip-permissions ...
     require_sandbox_for_bypass: bool = False  # ... and do NOT require AUTOBUILD_SANDBOX
     # --- per-session timeout plumbing ----------------------------------------
-    task_timeout_seconds: int = 1800  # int >= 1; monotonic per-session deadline
-    kill_grace_seconds: int = 10      # int >= 1; SIGTERM -> wait -> SIGKILL
-    timeout_max_retries: int = 1      # int >= 0; auto-retries for a timed-out task
+    task_timeout_seconds: int = 3600  # int >= 1; monotonic per-session deadline
+    kill_grace_seconds: int = 20      # int >= 1; SIGTERM -> wait -> SIGKILL
+    timeout_max_retries: int = 2      # int >= 0; auto-retries for a timed-out task
                                       # (0 = block on first timeout). Each retry
                                       # re-spends task_timeout_seconds.
 

@@ -199,7 +199,7 @@ def test_e2e_waiting_for_a_session_does_not_burn_max_iterations(git_repo, stub_b
     stub_bin(STUB_SLEEP="1.0")  # one session, far longer than max_iterations * sleep
     paths = init_project(git_repo, monkeypatch, integration="auto-merge", max_parallel=1)
     paths.config_file.write_text(
-        paths.config_file.read_text().replace("max_iterations: 50", "max_iterations: 3"))
+        paths.config_file.read_text().replace("max_iterations: 100", "max_iterations: 3"))
     write_task(paths, "task-001")
 
     loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=0.05)
@@ -215,7 +215,7 @@ def test_e2e_max_iterations_drains_inflight_and_reports_leftover(git_repo, stub_
     stub_bin()  # instant COMPLETE
     paths = init_project(git_repo, monkeypatch, integration="auto-merge", max_parallel=1)
     paths.config_file.write_text(
-        paths.config_file.read_text().replace("max_iterations: 50", "max_iterations: 1"))
+        paths.config_file.read_text().replace("max_iterations: 100", "max_iterations: 1"))
     write_task(paths, "task-001")
     write_task(paths, "task-002")
 
