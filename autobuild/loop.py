@@ -95,6 +95,66 @@ def _classify_sentinel(sdir: Path) -> str:
     return "reapable" if isinstance(_read_json(result_file), dict) else "corrupt"
 
 
+# --- worktree-isolation guards -----------------------------------------------
+
+class BaseBranchLeak(RuntimeError):
+    """A session advanced base_branch with commit(s) the harness did not create — an
+    agent that escaped its worktree and committed onto the live base. Raised by the
+    reaper to HALT the run: base is no longer something autobuild controls, so building
+    further integrations on it would compound the damage. str() is the operator message."""
+
+
+class DirtyBaseTree(RuntimeError):
+    """`run` refused to start because the base working tree has uncommitted source — a
+    stray `git add -A` in a session could sweep it into a task commit. str() is the
+    operator message."""
+
+
+def base_leak_commits(paths: Paths, base_branch: str, base_sha: str) -> list[str]:
+    """Commits the harness did NOT create that have landed on base_branch's first-parent
+    mainline since `base_sha`. The harness only ever advances base via a `--no-ff` MERGE
+    commit (integrate's auto-merge); a session is supposed to commit solely on its own
+    autobuild/<tid> branch. So a NON-MERGE commit on base's first-parent chain is, by
+    construction, a worktree escape — an agent that committed straight onto base. Returns
+    the offending shas (newest first), or [] when clean or when base/base_sha can't be
+    resolved (we never false-alarm on a check we couldn't run)."""
+    if not base_sha or not base_branch:
+        # An empty right-hand side of the range resolves to HEAD (`base_sha..`), which
+        # would mis-report ordinary HEAD commits as leaks. Unreachable via the CLI
+        # (config rejects an empty base_branch) but guarded so the contract holds for a
+        # directly-constructed Config too.
+        return []
+    r = _git(paths.root, "rev-list", "--first-parent", "--no-merges",
+             f"{base_sha}..{base_branch}")
+    if r.returncode != 0:
+        return []
+    return [line for line in r.stdout.split() if line]
+
+
+def dirty_base_paths(paths: Paths) -> list[str]:
+    """Uncommitted paths in the base working tree that a `git add -A` could sweep,
+    EXCLUDING `.autobuild/` (harness state) and `tasks/` (autobuild rewrites task status
+    continuously — flagging it would make the guard useless mid-run). These two are not
+    user work a sweep would lose; anything else (a modified source file, a stray
+    untracked file) is. Returns [] when git can't report status."""
+    r = _git(paths.root, "status", "--porcelain")
+    if r.returncode != 0:
+        return []
+    dirty: list[str] = []
+    for line in r.stdout.splitlines():
+        if not line.strip():
+            continue
+        path = line[3:]
+        if " -> " in path:           # rename: the destination is what would be swept
+            path = path.split(" -> ", 1)[1]
+        path = path.strip().strip('"')
+        top = path.split("/", 1)[0]
+        if top in (".autobuild", "tasks"):
+            continue
+        dirty.append(path)
+    return dirty
+
+
 # --- run lock ----------------------------------------------------------------
 
 class RunLockHeld(RuntimeError):
@@ -341,6 +401,32 @@ def _reap_session_locked(sdir: Path, result: dict, config: Config, paths: Paths)
     requeued = False
     followups: list[str] = []
     checks_outcome = "n/a"
+
+    # Worktree-escape check FIRST, before any integration: if the session committed onto
+    # base_branch (instead of its own branch), base is corrupt — block the task, record
+    # forensics, and HALT loudly. Deliberately no reaped.json: leave the session
+    # un-reaped so a re-run keeps flagging until a human cleans base. Runs for every
+    # status (an agent can leak then report BLOCKED/TIMEOUT just as easily as COMPLETE).
+    meta = _read_json(sdir / "meta.json") or {}
+    base_branch = str(meta.get("base_branch") or config.base_branch)
+    leaks = base_leak_commits(paths, base_branch, str(meta.get("base_sha", "")))
+    if leaks:
+        if task:
+            set_status(task.path, "blocked")
+        _atomic_write_json(sdir / "leak.json",
+                           {"detected_at": _now(), "task": tid, "base_branch": base_branch,
+                            "base_sha": meta.get("base_sha", ""), "commits": leaks})
+        warn(f"!! BASE LEAK !! {sid}: {tid} — {base_branch} advanced with "
+             f"{len(leaks)} commit(s) autobuild did not create: {', '.join(leaks)}")
+        warn(f"   a session escaped its worktree and committed onto {base_branch} (or it "
+             f"was committed to outside autobuild during the run). NOT integrating; {tid} "
+             f"blocked. Inspect {sdir / 'leak.json'}, move the commit(s) onto a branch and "
+             f"reset {base_branch}, then re-run.")
+        # Raise BEFORE the remove_worktree/delete_branch cleanup below: the worktree and
+        # the autobuild/<tid> branch must survive so an operator can recover the work.
+        raise BaseBranchLeak(
+            f"{base_branch} carries {len(leaks)} commit(s) autobuild did not create "
+            f"(session {sid}, task {tid}); refusing to integrate onto a corrupted base")
 
     if status == "COMPLETE":
         # Trust, but verify: re-run the checks against the committed tree ourselves
@@ -642,15 +728,50 @@ def run(paths: Paths, config: Config, *, sleep_seconds: float = 2.0) -> None:
         _run_locked(paths, config, sleep_seconds=sleep_seconds)
 
 
+def _assert_base_clean(paths: Paths) -> None:
+    """Refuse to start if the base working tree has uncommitted source — an escaped
+    session's `git add -A` could otherwise sweep it into a task commit (exactly the
+    blast-radius amplifier seen in the field). Override with AUTOBUILD_ALLOW_DIRTY_BASE=1
+    for the rare case where that risk is understood and accepted."""
+    if os.environ.get("AUTOBUILD_ALLOW_DIRTY_BASE") == "1":
+        return
+    dirty = dirty_base_paths(paths)
+    if dirty:
+        shown = ", ".join(dirty[:5]) + (f" (+{len(dirty) - 5} more)" if len(dirty) > 5 else "")
+        raise DirtyBaseTree(
+            f"base working tree has {len(dirty)} uncommitted change(s): {shown}. "
+            f"Commit or stash them first — a session that escapes its worktree could "
+            f"sweep them into a task commit. Set AUTOBUILD_ALLOW_DIRTY_BASE=1 to override.")
+
+
 def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float) -> None:
     paths.ensure_runtime_dirs()
+    _assert_base_clean(paths)
     log(f"starting loop (max_parallel={config.max_parallel}, max_iterations={config.max_iterations})")
     reconcile(paths, sweep_in_progress=True)
 
     running: list[RunningSession] = []
+    try:
+        _supervise(paths, config, running, sleep_seconds=sleep_seconds)
+    except BaseBranchLeak:
+        # base is corrupt (a session escaped onto it): stop now and KILL any sessions
+        # still running — they'd only burn tokens on a doomed run, and the same leak
+        # check would refuse to integrate them anyway. Then re-raise for the CLI to
+        # report. `running` is mutated in place by _supervise, so it holds the live set.
+        for rs in running:
+            _kill_group(rs, config.kill_grace_seconds)
+        raise
+    status(paths, config)
+
+
+def _supervise(paths: Paths, config: Config, running: list[RunningSession], *,
+               sleep_seconds: float) -> None:
+    """The scheduling loop. Appends spawned sessions to `running` and keeps it in sync
+    with the live set IN PLACE (`running[:] = ...`) so a caller catching BaseBranchLeak
+    can still see — and kill — what was running when the halt fired."""
     iteration = 0
     while True:
-        running = _harvest(running, config, paths)
+        running[:] = _harvest(running, config, paths)
 
         free = config.max_parallel - len(running)
         # max_iterations bounds SCHEDULING ROUNDS (passes that start new work), not poll
@@ -671,7 +792,7 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float) -> None:
 
         # Final harvest before deciding the backlog is settled: a session that
         # finishes in this window must be reaped here, not silently stranded.
-        running = _harvest(running, config, paths)
+        running[:] = _harvest(running, config, paths)
 
         if not running:
             tasks = iter_tasks(paths.tasks_dir)
@@ -711,8 +832,6 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float) -> None:
             # Block until a running session finishes rather than busy-spinning. If a
             # reap had unblocked a task, claim_tasks above would have claimed it.
             _wait_until_next_event(running, sleep_seconds)
-
-    status(paths, config)
 
 
 # --- status ------------------------------------------------------------------

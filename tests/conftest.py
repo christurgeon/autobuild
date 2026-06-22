@@ -26,6 +26,7 @@ def hermetic_env(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("AUTOBUILD_ALLOW_DIRTY_BASE", raising=False)
 
 
 def run_git(repo, *args, check=True):

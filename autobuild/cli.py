@@ -37,9 +37,35 @@ def ab_init(paths: Paths) -> int:
         paths.config_file.write_text((tpl / "config.yml").read_text(encoding="utf-8"), encoding="utf-8")
 
     _install_skills(tpl / "skills", paths.skills_dir)
+    _ensure_gitignore(paths)
 
-    ok("ready. Edit GOAL.md and tasks/, then run: autobuild run")
+    ok("ready. Edit GOAL.md and tasks/, commit them (autobuild run refuses a dirty "
+       "base tree), then: autobuild run")
     return 0
+
+
+def _ensure_gitignore(paths: Paths) -> None:
+    """Make sure `.autobuild/` is gitignored: it is disposable harness state (sessions,
+    worktrees, locks) that must never be committed, and ignoring it also keeps a session's
+    `git add -A` from sweeping in worktree noise. Idempotent: append the entry only if no
+    line already names `.autobuild`, creating .gitignore if absent — never clobbering it."""
+    gi = paths.root / ".gitignore"
+    try:
+        lines = gi.read_text(encoding="utf-8").splitlines() if gi.exists() else []
+    except OSError:
+        return
+
+    def _names_autobuild(line: str) -> bool:
+        # match `.autobuild`, `.autobuild/`, `/.autobuild`, `.autobuild/**`, etc.
+        s = line.strip().lstrip("/").rstrip("/")
+        return s == ".autobuild" or s.removesuffix("/**").rstrip("/") == ".autobuild"
+
+    if any(_names_autobuild(line) for line in lines):
+        return
+    block = ("" if not lines or lines[-1].strip() == "" else "\n") + \
+            "# autobuild: disposable harness state (rebuilt from tasks/ + git)\n.autobuild/\n"
+    with open(gi, "a", encoding="utf-8") as fh:
+        fh.write(block)
 
 
 def _install_skills(src, skills_dir) -> None:
@@ -122,10 +148,20 @@ def main(argv: list[str] | None = None) -> int:
             _err(f"another 'autobuild run' is active (holds {e}); refusing to start a "
                  f"second run. The lock releases automatically when that run exits.")
             return 1
+        except loop_mod.DirtyBaseTree as e:
+            _err(str(e))
+            return 2
+        except loop_mod.BaseBranchLeak as e:
+            _err(str(e))
+            return 2
     elif args.command == "status":
         loop_mod.status(paths, config)
     elif args.command == "reap":
-        loop_mod.reap(paths, config)
+        try:
+            loop_mod.reap(paths, config)
+        except loop_mod.BaseBranchLeak as e:
+            _err(str(e))
+            return 2
     elif args.command == "clean":
         loop_mod.clean(paths)
     return 0

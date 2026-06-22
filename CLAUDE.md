@@ -89,7 +89,11 @@ Module responsibilities:
   conflict) or `DependencyMergeError` (other failure, e.g. no git identity), aborting first so no
   half-merged tree is left.
 - **`autobuild/session.py`** — `spawn_session`: builds the session dir + worktree + `meta.json`,
-  sets the task `in-progress`, and launches a **fresh `claude -p`** in its **own process group**
+  **stages the contract/`GOAL.md`/task into the session dir** (`_stage_contract`) and points the
+  prompt only at those copies + the worktree — never a main-checkout path, so the agent has no
+  base-tree path to resolve work against (the original worktree-escape vector) — snapshots
+  `base_branch`'s sha into `meta.json` (`base_sha`, for the leak check), sets the task
+  `in-progress`, and launches a **fresh `claude -p`** in its **own process group**
   (`start_new_session=True`, so the whole agent subtree can be signalled at once) via
   `subprocess.Popen`. `_session_flags` builds the **permission posture**: a bypass posture
   (`dangerously_bypass_permissions`, or `permission_mode: bypassPermissions`) emits
@@ -110,6 +114,13 @@ Module responsibilities:
   `SIGTERM` → `kill_grace_seconds` → `SIGKILL` over the session's process group), `reconcile`
   (startup crash recovery), `verify_checks`, `integrate`, `file_followups`, `status`, and
   `clean`. The CLI `reap` maps to `reap` here (a lock-aware wrapper), not `reap_all` directly.
+  Two **worktree-isolation guards** also live here: `_assert_base_clean` (run refuses to start
+  with a dirty base tree — uncommitted source a stray `git add -A` could sweep; `tasks/` +
+  `.autobuild/` exempt, override `AUTOBUILD_ALLOW_DIRTY_BASE=1`) and `base_leak_commits`, which
+  the reaper runs on every session **before integrating**: a non-merge commit on `base_branch`'s
+  first-parent chain since the session's `base_sha` is, by construction, an escaped agent that
+  committed onto base (the harness only ever advances base via `--no-ff` merges), so it raises
+  `BaseBranchLeak` to halt the run rather than build on a corrupted base.
 - **`autobuild/paths.py`** — the frozen `Paths` dataclass.
 
 ### The session lifecycle / sentinel protocol (the core data flow)
@@ -117,13 +128,18 @@ Module responsibilities:
 This is the part that requires reading multiple files to understand:
 
 1. `claim_tasks` flips a runnable `todo` task → `claimed` under the backlog lock.
-2. `spawn_session` creates `.autobuild/sessions/<sid>/` + a worktree, writes `meta.json`, sets
+2. `spawn_session` creates `.autobuild/sessions/<sid>/` + a worktree, stages the
+   contract/`GOAL.md`/task into the session dir and snapshots `base_sha` into `meta.json`, sets
    the task `in-progress`, and launches a **fresh `claude -p` process** (the Ralph property: no
    context carries between sessions — all state is files + git). It returns a `RunningSession`
    the loop tracks in memory.
 3. The session follows `autobuild/templates/CLAUDE.md`'s contract and ends by writing
    `.autobuild/sessions/<sid>/result.json` with `status: COMPLETE | BLOCKED | NEEDS_HUMAN`.
-4. `reap_session` reads that sentinel and acts. For `COMPLETE` it **verifies first**: unless
+4. `reap_session` reads that sentinel and acts. **Before anything else** it runs the
+   worktree-escape check (`base_leak_commits`): if the session left a non-merge commit on
+   `base_branch`, it blocks the task, writes a `leak.json` forensic marker, and raises
+   `BaseBranchLeak` to halt — base is corrupt and must not be integrated onto. Otherwise, for
+   `COMPLETE` it **verifies first**: unless
    `verify_checks: false`, it re-runs `config.checks` against the session's worktree and, if any
    fail, blocks the task and keeps the branch instead of integrating (trust, but verify). If they
    pass it **integrates** (`integrate` → `pr` via `gh` / `auto-merge` / `branch`) and only then
@@ -198,7 +214,9 @@ settle check yields back to claiming when `runnable_tasks` is non-empty rather t
   that style unless you're deliberately adding a dependency.
 - The core has been hardened by dogfooding autobuild on its own backlog — the run-lock,
   dependency-aware worktree bases, reaper checks-verification, config validation, stuck-dependency
-  surfacing, the session **permission posture** (bypass/sandbox gate, fenced allowlist), and
-  **per-session timeouts** (process-group spawn + monotonic deadline + `SIGTERM`/`SIGKILL` kill)
-  are all in place with tests, along with the sentinel/termination races those exposed. Match
-  that bar: a real defect plus a regression test beats new scope.
+  surfacing, the session **permission posture** (bypass/sandbox gate, fenced allowlist),
+  **per-session timeouts** (process-group spawn + monotonic deadline + `SIGTERM`/`SIGKILL` kill),
+  and **worktree isolation** (session-dir contract staging instead of main-checkout anchors,
+  `base_leak_commits` escape detection, the dirty-base guard) are all in place with tests, along
+  with the sentinel/termination races those exposed. Match that bar: a real defect plus a
+  regression test beats new scope.

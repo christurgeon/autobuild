@@ -23,6 +23,12 @@ def init_project(git_repo, monkeypatch, integration="auto-merge", max_parallel=5
            .replace("integration: pr", f"integration: {integration}")
            .replace("max_parallel: 3", f"max_parallel: {max_parallel}"))
     paths.config_file.write_text(cfg)
+    # Commit the scaffolding init laid down (GOAL.md, CLAUDE.md, .gitignore): `run` now
+    # refuses a dirty base tree, and an uncommitted contract file is exactly the kind of
+    # stray edit a worktree-escaping session could sweep. tasks/ + .autobuild/ are exempt.
+    import subprocess
+    subprocess.run(["git", "-C", str(git_repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(git_repo), "commit", "-q", "-m", "scaffold"], check=True)
     return paths
 
 
@@ -227,3 +233,27 @@ def test_e2e_max_iterations_drains_inflight_and_reports_leftover(git_repo, stub_
     out = capsys.readouterr().out
     assert "hit max_iterations (1)" in out
     assert "backlog drained — COMPLETE" not in out
+
+
+def test_e2e_run_halts_on_base_leak(git_repo, stub_bin, monkeypatch, git):
+    """A session that escapes its worktree and commits onto base is caught end-to-end:
+    `run` raises BaseBranchLeak (exit 2 at the CLI), blocks the task, and writes a
+    leak.json marker — it does NOT integrate onto the corrupted base."""
+    import glob
+
+    import pytest
+
+    stub_bin(STUB_LEAK_DIR=str(git_repo))  # the stub commits straight onto base
+    paths = init_project(git_repo, monkeypatch, integration="auto-merge")
+    write_task(paths, "task-001")
+
+    with pytest.raises(loop_mod.BaseBranchLeak):
+        loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=5)
+
+    assert statuses(paths)["task-001"] == "blocked"
+    markers = glob.glob(str(paths.sessions_dir / "*" / "leak.json"))
+    assert markers, "expected a leak.json forensic marker"
+    leak = json.loads(open(markers[0]).read())
+    assert leak["base_branch"] == "main" and leak["commits"]
+    # no integration merge landed on base (the leak commit is base's tip, not a merge)
+    assert "Merge" not in git(git_repo, "log", "-1", "--format=%s", "main").stdout
