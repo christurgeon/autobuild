@@ -118,9 +118,11 @@ Module responsibilities:
   with a dirty base tree — uncommitted source a stray `git add -A` could sweep; `tasks/` +
   `.autobuild/` exempt, override `AUTOBUILD_ALLOW_DIRTY_BASE=1`) and `base_leak_commits`, which
   the reaper runs on every session **before integrating**: a non-merge commit on `base_branch`'s
-  first-parent chain since the session's `base_sha` is, by construction, an escaped agent that
-  committed onto base (the harness only ever advances base via `--no-ff` merges), so it raises
-  `BaseBranchLeak` to halt the run rather than build on a corrupted base.
+  first-parent chain since the session's `base_sha` is, by construction, a session that committed
+  onto base (the harness only ever advances base via `--no-ff` merges). The response is scoped to
+  `config.integration`: in `auto-merge` (deliverables merge onto base) it raises `BaseBranchLeak`
+  to halt the whole run; in `pr`/`branch` (base is never integrated onto) it blocks just that task
+  and continues. Either way it writes a `leak.json` marker.
 - **`autobuild/paths.py`** — the frozen `Paths` dataclass.
 
 ### The session lifecycle / sentinel protocol (the core data flow)
@@ -137,8 +139,9 @@ This is the part that requires reading multiple files to understand:
    `.autobuild/sessions/<sid>/result.json` with `status: COMPLETE | BLOCKED | NEEDS_HUMAN`.
 4. `reap_session` reads that sentinel and acts. **Before anything else** it runs the
    worktree-escape check (`base_leak_commits`): if the session left a non-merge commit on
-   `base_branch`, it blocks the task, writes a `leak.json` forensic marker, and raises
-   `BaseBranchLeak` to halt — base is corrupt and must not be integrated onto. Otherwise, for
+   `base_branch` it blocks the task and writes a `leak.json` marker, then — in `auto-merge` —
+   raises `BaseBranchLeak` to halt (base is corrupt and must not be merged onto), or — in
+   `pr`/`branch` — just blocks that task and lets the run continue. Otherwise, for
    `COMPLETE` it **verifies first**: unless
    `verify_checks: false`, it re-runs `config.checks` against the session's worktree and, if any
    fail, blocks the task and keeps the branch instead of integrating (trust, but verify). If they

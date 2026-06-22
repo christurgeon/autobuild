@@ -57,6 +57,13 @@ session may do).
    worktrees), `base_branch`, `max_iterations`, `verify_checks`, and the timeout trio
    (`task_timeout_seconds`, `kill_grace_seconds`, `timeout_max_retries`). The template
    defaults are fine for most projects.
+   - **Heads-up — worktree isolation has no config keys, only env vars.** `autobuild run`
+     **refuses to start with a dirty base tree** (uncommitted source outside `tasks/` +
+     `.autobuild/`), so tell the user to **commit GOAL.md/tasks/config before running**;
+     `AUTOBUILD_ALLOW_DIRTY_BASE=1` overrides it (sibling of `AUTOBUILD_SANDBOX`). And the
+     reaper blocks any session that committed onto `base_branch` (in `auto-merge` it halts
+     the run) — there's nothing to tune, just know it exists when a run won't start or a
+     task blocks with a `leak.json`.
 5. **Show the diff, confirm, write.** Present the change **inline as old→new** (there's no
    command for this in an interactive session — show it in chat), plus a one-line
    plain-English statement of the chosen security posture. **Also update the posture
