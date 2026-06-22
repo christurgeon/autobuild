@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import time
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,7 +19,7 @@ from subprocess import Popen
 from .config import Config
 from .paths import Paths
 from .tasks import Task, set_status, task_index
-from .worktree import WorktreeError, branch_name, make_worktree
+from .worktree import WorktreeError, branch_name, head_sha, make_worktree
 
 
 @dataclass
@@ -47,23 +49,47 @@ def new_session_id() -> str:
     return f"sess-{stamp}-{uuid.uuid4().hex[:8]}"
 
 
-def build_prompt(sdir: str, task_file: str, wt: str, tid: str,
-                 goal_file: str, claude_md: str) -> str:
-    # GOAL.md / CLAUDE.md are referenced by their ROOT absolute paths, not "in this
-    # worktree": a worktree forked from the committed HEAD won't contain them if the
-    # user edited GOAL/tasks but hadn't committed before running. The root copies are the
-    # source of truth and are always present, so the session sees its contract either way.
-    # (The task file is likewise an absolute path.) Code changes still happen in the worktree.
+def build_prompt(sdir: str, task_file: str, wt: str, tid: str) -> str:
+    # The agent is anchored ONLY to its worktree and its session dir — never to the main
+    # checkout. The contract, goal, and task are STAGED INTO the session dir (see
+    # _stage_contract) and referenced there, so the agent is never handed a main-checkout
+    # path to resolve repo-relative work against. (That anchoring was the original escape:
+    # given `/proj/src/...`, an agent would edit + commit in /proj — the live base tree —
+    # instead of its worktree.) Staging copies also means the session sees an
+    # edited-but-uncommitted GOAL/CLAUDE/task that a fresh worktree wouldn't contain.
+    # `task_file` is the staged copy in `sdir`. "session directory is:" and "Work ONLY on
+    # task" are load-bearing markers the reaper/stub parse — keep them verbatim.
     return (
         f"You are an autobuild session. Your session directory is: {sdir}\n"
-        f"Your assigned task file is: {task_file}\n"
-        f"You are working inside an isolated git worktree at: {wt}\n\n"
-        f"Read your contract and the project's north star:\n"
-        f"  - CLAUDE.md (your contract): {claude_md}\n"
-        f"  - GOAL.md (the north star):  {goal_file}\n"
+        f"Your git worktree (your repository) is: {wt}\n\n"
+        f"Do ALL of your work inside the worktree {wt}: every file read, edit, shell "
+        f"command, and git operation happens there, on the branch already checked out. "
+        f"Do NOT read, edit, or commit any path outside {wt} and {sdir} — in particular "
+        f"never touch the main project checkout. Committing or editing outside your "
+        f"worktree is a contract violation that the harness detects and rejects.\n\n"
+        f"Your contract, the project's north star, and your task are staged in your "
+        f"session directory — read them there:\n"
+        f"  - CLAUDE.md (your contract): {sdir}/CLAUDE.md\n"
+        f"  - GOAL.md (the north star):  {sdir}/GOAL.md\n"
+        f"  - your task file:            {task_file}\n"
         f"then follow plan -> review -> implement and finish by writing {sdir}/result.json.\n"
         f"Work ONLY on task {tid}. Make all code changes from within {wt}.\n"
     )
+
+
+def _stage_contract(sdir: Path, paths: Paths, task: Task) -> Path:
+    """Copy the contract (CLAUDE.md), the north star (GOAL.md), and the task file into the
+    session dir so the prompt can point the agent there instead of at the main checkout.
+    Returns the staged task-file path. GOAL/CLAUDE copies are best-effort: a missing one
+    just isn't staged. They land in `sdir` — already `--add-dir`'d and OUTSIDE the worktree
+    tree — so they are never swept into the agent's feature commit."""
+    for src, name in ((paths.claude_md, "CLAUDE.md"), (paths.goal_file, "GOAL.md")):
+        with suppress(OSError):
+            if src.is_file():
+                shutil.copyfile(src, sdir / name)
+    staged_task = sdir / task.path.name
+    shutil.copyfile(task.path, staged_task)
+    return staged_task
 
 
 def _atomic_write_json(path: Path, payload: dict) -> None:
@@ -292,20 +318,27 @@ def spawn_session(task: Task, config: Config, paths: Paths) -> RunningSession:
 
     # The base meta.json is written (atomically) BEFORE the spawn so an in-progress
     # session always has a meta for crash recovery; pgid is added once the child exists.
+    # Snapshot base_branch BEFORE the agent runs so the reaper can later prove the
+    # session never advanced it (the worktree-escape leak check in loop.base_leak_commits).
     meta = {
         "session": sid,
         "task": tid,
-        "task_file": str(task.path),
+        # the STAGED copy (in sdir), not the root task path: meta.json sits in the
+        # agent-readable session dir, so recording the root path would re-expose a
+        # main-checkout anchor. The root task is still addressable via `task` (the id).
+        "task_file": str(sdir / task.path.name),
         "worktree": str(wt),
         "branch": branch_name(tid),
+        "base_branch": config.base_branch,
+        "base_sha": head_sha(paths.root, config.base_branch),
         "status": "in-progress",
         "started": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     _atomic_write_json(sdir / "meta.json", meta)
     set_status(task.path, "in-progress")
 
-    prompt = build_prompt(str(sdir), str(task.path), str(wt), tid,
-                          str(paths.goal_file), str(paths.claude_md))
+    staged_task = _stage_contract(sdir, paths, task)
+    prompt = build_prompt(str(sdir), str(staged_task), str(wt), tid)
     out = open(sdir / "session.out", "w")
     err = open(sdir / "session.err", "w")
     try:

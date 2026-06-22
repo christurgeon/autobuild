@@ -26,24 +26,21 @@ def write_task(paths, tid="task-001"):
 # ---- prompt + id ------------------------------------------------------------
 
 def test_build_prompt_has_contract_lines_the_stub_parses():
-    prompt = build_prompt("/s/dir", "/p/task-001.md", "/w/tree", "task-001",
-                          "/root/GOAL.md", "/root/CLAUDE.md")
+    prompt = build_prompt("/s/dir", "/s/dir/task-001.md", "/w/tree", "task-001")
     import re
     assert re.search(r"session directory is:\s*(\S+)", prompt).group(1) == "/s/dir"
     assert re.search(r"Work ONLY on task\s+(\S+)", prompt).group(1).rstrip(".") == "task-001"
-    assert "/p/task-001.md" in prompt
+    assert "/s/dir/task-001.md" in prompt
     assert "/w/tree" in prompt
 
 
-def test_build_prompt_points_at_root_contract_not_the_worktree():
-    """The session must read GOAL.md and CLAUDE.md by their ROOT absolute paths, not
-    "in this worktree": a worktree forked from the committed HEAD won't contain them if
-    the user edited GOAL/tasks but didn't commit before running. Pointing at the root
-    copies makes the session see the source-of-truth contract either way."""
-    prompt = build_prompt("/s/dir", "/p/task-001.md", "/w/tree", "task-001",
-                          "/root/GOAL.md", "/root/CLAUDE.md")
-    assert "/root/GOAL.md" in prompt and "/root/CLAUDE.md" in prompt
-    assert "in this worktree" not in prompt
+def test_build_prompt_anchors_only_to_worktree_and_session_dir():
+    """The session must read its contract/goal/task from the STAGED copies in its session
+    dir and is told to work only inside the worktree — it must never be handed a
+    main-checkout path to resolve repo-relative work against (the original escape vector)."""
+    prompt = build_prompt("/s/dir", "/s/dir/task-001.md", "/w/tree", "task-001")
+    assert "/s/dir/GOAL.md" in prompt and "/s/dir/CLAUDE.md" in prompt
+    assert "outside" in prompt.lower()
 
 
 def test_new_session_id_unique_and_prefixed():
@@ -75,8 +72,7 @@ def test_spawn_invokes_claude_with_expected_argv(git_repo, monkeypatch, stub_pgi
     # stable prefix: claude -p <prompt> --model <model>, then the permission posture flags
     assert captured["argv"][:5] == [
         "claude", "-p",
-        build_prompt(str(rs.sdir), str(task.path), str(rs.worktree), "task-001",
-                     str(paths.goal_file), str(paths.claude_md)),
+        build_prompt(str(rs.sdir), str(rs.sdir / "task-001.md"), str(rs.worktree), "task-001"),
         "--model", "test-model",
     ]
     assert "--add-dir" in captured["argv"]          # posture flags follow the prefix

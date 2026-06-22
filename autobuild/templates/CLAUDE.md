@@ -5,8 +5,16 @@ task** and dropped you into an **isolated git worktree** on your own branch. You
 entire memory of this project lives in files and git history — nothing carries over
 between sessions, so write down what matters.
 
-Read `GOAL.md` for the project's north star and constraints. Read your assigned task
-file (its path is in your session's `meta.json`, also passed in your prompt).
+Read `GOAL.md` for the project's north star and constraints, and your assigned task
+file. Both — along with this contract — are **staged into your session directory** and
+their paths are given in your prompt; read them there.
+
+**Stay inside your worktree.** Your worktree (its path is in your prompt) is your whole
+repository: do every file read, edit, shell command, and `git` operation inside it, on
+the branch already checked out. Never read, edit, or commit any path outside your
+worktree and your session directory — in particular never touch the main project
+checkout. Committing or editing outside your worktree corrupts shared state; the harness
+detects it and **rejects your work**.
 
 ## The workflow: plan → review → implement
 
@@ -27,7 +35,8 @@ Follow these phases **in order**. Do not skip straight to code.
 ### 3. Implement
 - Execute the plan. Make the smallest coherent change that satisfies the task.
 - Run every command under `checks:` in `.autobuild/config.yml`. **All must pass.**
-- If checks pass: `git add -A && git commit` with a clear message referencing the task id.
+- If checks pass: `git add -A && git commit` **from inside your worktree** with a clear
+  message referencing the task id (this commits onto your branch, never onto the base).
 - Append a short narration of what you did to `<session-dir>/progress.log`.
 
 ## Finishing: write the sentinel

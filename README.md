@@ -95,7 +95,12 @@ uv tool install .              # installs the `autobuild` command globally
 cd ~/my-big-project
 autobuild init
 
-# 3. Write your GOAL.md and a few tasks/ files, then:
+# 3. Write your GOAL.md and a few tasks/ files, then commit them — `run` refuses to
+#    start with a dirty base tree, so an escaped session can't sweep uncommitted work
+#    into a task commit (override: AUTOBUILD_ALLOW_DIRTY_BASE=1):
+git add -A && git commit -m "autobuild backlog"
+
+# 4. Drain the backlog:
 autobuild run            # drains the backlog
 autobuild status         # see task + session state at any time
 ```
@@ -202,6 +207,17 @@ Be honest about where the boundary is:
 - **A cloned target repo's `.claude/` is hostile input.** Its hooks would run with the
   agent's privileges; autobuild passes `--strict-mcp-config` and denies writes to
   `.claude/**`, but the real containment is still the VM.
+- **A session is kept on its worktree, and an escape is caught.** The prompt anchors the
+  agent only to its worktree and session dir — the contract, `GOAL.md`, and the task are
+  *staged into the session dir*, so the agent is never handed a main-checkout path to
+  resolve work against (the original escape vector). Belt-and-suspenders for the cases an
+  honest anchor can't prevent: `run` snapshots `base_branch` at spawn and the reaper
+  **refuses to integrate and halts loudly** (`BaseBranchLeak`) if a session left a
+  non-merge commit on base — the signature of an agent that committed onto the live base
+  instead of its branch. `run` also **refuses to start with a dirty base tree** (override:
+  `AUTOBUILD_ALLOW_DIRTY_BASE=1`), since a stray `git add -A` could otherwise sweep
+  uncommitted work into a task commit. These keep an *honest* agent contained and make a
+  dishonest one's mess detectable; they are not a substitute for the VM.
 
 ## Why not just `/loop`?
 

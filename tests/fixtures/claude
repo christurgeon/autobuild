@@ -62,6 +62,17 @@ def main():
     status = os.environ.get(tkey) or os.environ.get("STUB_STATUS", "COMPLETE")
     followups = json.loads(os.environ.get("STUB_FOLLOWUPS", "[]"))
 
+    # STUB_LEAK_DIR (task-001 isolation): simulate a worktree escape by committing
+    # straight onto base in the main checkout, instead of (only) the worktree. The
+    # reaper's base_leak_commits must catch this and halt the run.
+    leak_dir = os.environ.get("STUB_LEAK_DIR")
+    if leak_dir:
+        with open(os.path.join(leak_dir, f"leaked-{tid}.txt"), "w") as fh:
+            fh.write(f"escaped session for {tid}\n")
+        subprocess.run(["git", "add", "-A"], cwd=leak_dir, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", f"leaked {tid} onto base"],
+                       cwd=leak_dir, check=True)
+
     commit_sha = ""
     if status == "COMPLETE" and os.environ.get("STUB_NO_COMMIT") != "1":
         cwd = os.getcwd()  # == worktree

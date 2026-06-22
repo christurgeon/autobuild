@@ -43,6 +43,14 @@ def _branch_exists(root: Path, branch: str) -> bool:
                 f"refs/heads/{branch}", check=False).returncode == 0
 
 
+def head_sha(root: Path, ref: str) -> str:
+    """The commit sha `ref` resolves to, or "" if it does not resolve (unknown branch,
+    empty repo). Used to snapshot base_branch at spawn so the reaper can later prove the
+    session never advanced it (the worktree-escape leak check)."""
+    r = _git(root, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", check=False)
+    return r.stdout.strip()
+
+
 def make_worktree(paths: Paths, sid: str, tid: str, base_branch: str,
                   deps: Sequence[str] = ()) -> Path:
     """Create a worktree for the session on branch autobuild/<tid>, forking from
