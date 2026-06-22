@@ -13,6 +13,15 @@ max_iterations: 100           # integer >= 1: global safety stop for the outer l
 #   branch     -> leave the branch; a human merges later
 integration: pr
 
+# Worktree isolation (no config keys — controlled by env vars, like AUTOBUILD_SANDBOX):
+# each session works only in its own git worktree, never on base_branch.
+#  - `autobuild run` REFUSES TO START if base_branch's working tree has uncommitted source
+#    (a stray `git add -A` in a session could sweep it into a task commit). Commit/stash
+#    first, or set AUTOBUILD_ALLOW_DIRTY_BASE=1 to override. (tasks/ + .autobuild/ exempt.)
+#  - The reaper detects a session that committed onto base_branch and refuses to integrate
+#    it: in auto-merge it HALTS the run (base corrupt); in pr/branch it just blocks that
+#    one task. Forensics land in .autobuild/sessions/<id>/leak.json.
+
 # Commands run after the implement phase. ALL must exit 0 to commit/finish.
 # Must be a YAML list of non-empty strings (a bare string is rejected). Tailor
 # these to your project. Empty list = no checks (not recommended).

@@ -402,11 +402,19 @@ def _reap_session_locked(sdir: Path, result: dict, config: Config, paths: Paths)
     followups: list[str] = []
     checks_outcome = "n/a"
 
-    # Worktree-escape check FIRST, before any integration: if the session committed onto
-    # base_branch (instead of its own branch), base is corrupt — block the task, record
-    # forensics, and HALT loudly. Deliberately no reaped.json: leave the session
-    # un-reaped so a re-run keeps flagging until a human cleans base. Runs for every
-    # status (an agent can leak then report BLOCKED/TIMEOUT just as easily as COMPLETE).
+    # Worktree-escape check FIRST, before any integration: a NON-MERGE commit on
+    # base_branch since spawn means the session (or something outside autobuild) committed
+    # straight onto base instead of its own branch. Block the task and record forensics
+    # either way; the *response* is scoped to the integration mode, because that is the
+    # only mode where base movement actually corrupts autobuild's model:
+    #   - auto-merge: dependents fork from base and deliverables MERGE onto it, so an
+    #     unexpected base commit poisons every later integration. HALT the whole run
+    #     (raise) and write NO reaped.json, so re-runs keep flagging until base is cleaned.
+    #   - pr/branch: autobuild never advances base — each deliverable is its own branch —
+    #     so one session's base movement can't corrupt the others. Block just this task
+    #     (its work may have escaped) and keep going; do NOT halt unrelated in-flight work
+    #     on what may simply be a concurrent commit to base.
+    # Runs for every status (an agent can leak then report BLOCKED/TIMEOUT, not just COMPLETE).
     meta = _read_json(sdir / "meta.json") or {}
     base_branch = str(meta.get("base_branch") or config.base_branch)
     leaks = base_leak_commits(paths, base_branch, str(meta.get("base_sha", "")))
@@ -415,18 +423,30 @@ def _reap_session_locked(sdir: Path, result: dict, config: Config, paths: Paths)
             set_status(task.path, "blocked")
         _atomic_write_json(sdir / "leak.json",
                            {"detected_at": _now(), "task": tid, "base_branch": base_branch,
-                            "base_sha": meta.get("base_sha", ""), "commits": leaks})
+                            "base_sha": meta.get("base_sha", ""), "commits": leaks,
+                            "integration": config.integration})
         warn(f"!! BASE LEAK !! {sid}: {tid} — {base_branch} advanced with "
              f"{len(leaks)} commit(s) autobuild did not create: {', '.join(leaks)}")
-        warn(f"   a session escaped its worktree and committed onto {base_branch} (or it "
-             f"was committed to outside autobuild during the run). NOT integrating; {tid} "
-             f"blocked. Inspect {sdir / 'leak.json'}, move the commit(s) onto a branch and "
-             f"reset {base_branch}, then re-run.")
-        # Raise BEFORE the remove_worktree/delete_branch cleanup below: the worktree and
-        # the autobuild/<tid> branch must survive so an operator can recover the work.
-        raise BaseBranchLeak(
-            f"{base_branch} carries {len(leaks)} commit(s) autobuild did not create "
-            f"(session {sid}, task {tid}); refusing to integrate onto a corrupted base")
+        if config.integration == "auto-merge":
+            warn(f"   auto-merge integrates onto {base_branch}, so this corrupts every "
+                 f"later merge — HALTING. {tid} blocked. Inspect {sdir / 'leak.json'}, move "
+                 f"the commit(s) onto a branch and reset {base_branch}, then re-run.")
+            # Raise BEFORE the remove_worktree/delete_branch cleanup below: the worktree
+            # and the autobuild/<tid> branch must survive so an operator can recover.
+            raise BaseBranchLeak(
+                f"{base_branch} carries {len(leaks)} commit(s) autobuild did not create "
+                f"(session {sid}, task {tid}); refusing to integrate onto a corrupted base")
+        # pr/branch: localized — block this task, keep its branch for recovery, and let the
+        # rest of the run proceed. Mark reaped so we don't re-flag it every pass.
+        warn(f"   {config.integration} mode never integrates onto {base_branch}, so other "
+             f"work is unaffected; {tid} blocked (its deliverable may have escaped). "
+             f"Inspect {sdir / 'leak.json'}; the run continues.")
+        remove_worktree(paths, sid)
+        _atomic_write_json(sdir / "reaped.json",
+                           {"reaped_at": _now(), "status": status, "integrated": False,
+                            "requeued": False, "checks": "n/a", "followups": [],
+                            "leak": leaks})
+        return True
 
     if status == "COMPLETE":
         # Trust, but verify: re-run the checks against the committed tree ourselves

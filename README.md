@@ -212,12 +212,15 @@ Be honest about where the boundary is:
   *staged into the session dir*, so the agent is never handed a main-checkout path to
   resolve work against (the original escape vector). Belt-and-suspenders for the cases an
   honest anchor can't prevent: `run` snapshots `base_branch` at spawn and the reaper
-  **refuses to integrate and halts loudly** (`BaseBranchLeak`) if a session left a
-  non-merge commit on base — the signature of an agent that committed onto the live base
-  instead of its branch. `run` also **refuses to start with a dirty base tree** (override:
-  `AUTOBUILD_ALLOW_DIRTY_BASE=1`), since a stray `git add -A` could otherwise sweep
-  uncommitted work into a task commit. These keep an *honest* agent contained and make a
-  dishonest one's mess detectable; they are not a substitute for the VM.
+  **refuses to integrate** if a session left a non-merge commit on base — the signature
+  of an agent that committed onto the live base instead of its branch. In `auto-merge`
+  (deliverables merge onto base) it **halts the whole run loudly** (`BaseBranchLeak`, exit
+  2); in `pr`/`branch` (base is never integrated onto) it just blocks that one task and
+  keeps going, so a concurrent commit to base can't stall unrelated work. `run` also
+  **refuses to start with a dirty base tree** (override: `AUTOBUILD_ALLOW_DIRTY_BASE=1`),
+  since a stray `git add -A` could otherwise sweep uncommitted work into a task commit.
+  These keep an *honest* agent contained and make a dishonest one's mess detectable; they
+  are not a substitute for the VM.
 
 ## Why not just `/loop`?
 

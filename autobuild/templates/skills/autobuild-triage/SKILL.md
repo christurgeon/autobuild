@@ -26,6 +26,9 @@ in files and git — read it before proposing anything.
      ABSENT — that is the normal shape of a `timeout` or a crashed/killed session, not
      corruption.** When it's missing (or `plan.md` is missing — also fine), reconstruct
      what happened from `meta.json` + `progress.log` + the preserved branch instead.
+   - **Check for `<id>/leak.json`** — if present, this session committed onto `base_branch`
+     instead of its worktree (a worktree escape, or a concurrent commit to base). See the
+     **base-leak** cause below; this is the one failure that can stop the whole run.
    - Inspect the **preserved branch** `autobuild/<task-id>`: `git log` and `git diff`
      against `base_branch`. A blocked-before-implementing task often has **0 commits**; a
      timed-out one may have WIP commits that wouldn't pass checks.
@@ -41,6 +44,13 @@ in files and git — read it before proposing anything.
      **preserved** until a retry re-forks from base — on a settled-without-retry run it's
      still there to inspect; `progress.log` usually shows what ate the budget).
    - **needs a human decision** (NEEDS_HUMAN).
+   - **base leak** (`<id>/leak.json` present) — the session committed onto `base_branch`
+     instead of its own branch. `leak.json` lists the offending `commits`. In `auto-merge`
+     this **halts the run** (`BaseBranchLeak`, exit 2) and re-fires every run until base is
+     clean; in `pr`/`branch` it only blocks that task. Recover: move the leaked commit(s)
+     onto a branch and reset `base_branch` back (`git branch salvage <sha>; git reset --hard
+     <sha-before-leak>`), then re-queue the task (`status: todo`). If it was a *concurrent*
+     human/CI commit (not a real escape), just keep it and re-queue the task.
 4. **Propose a concrete next action per task** — tie it to the cause: edit the task to
    clarify/scope it down and **re-queue** (set `status: todo`; the next `run` re-forks from
    base), split it into follow-ups, fix the config (raise `task_timeout_seconds`, correct a

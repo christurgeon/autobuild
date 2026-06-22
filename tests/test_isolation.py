@@ -107,32 +107,58 @@ def test_base_leak_commits_unresolvable_base_sha_does_not_false_alarm(git_repo, 
     assert base_leak_commits(paths, "", base0) == []
 
 
-def test_reap_detects_leak_blocks_task_and_raises(git_repo, git):
-    """End to end: a session whose run leaked a commit onto base is reaped → the task
-    is blocked, a leak.json forensic marker is written, the work is NOT integrated, and
-    BaseBranchLeak is raised so the supervisor halts instead of building on a bad base."""
+def _leak_onto_base(git_repo, git, base0):
+    """Simulate an escape: commit straight onto main, return the leaked commit sha."""
+    (git_repo / "swept.py").write_text("oops = True\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-q", "-m", "escaped commit on main")
+    return head(git_repo)
+
+
+def test_reap_detects_leak_in_auto_merge_blocks_task_and_raises(git_repo, git):
+    """auto-merge integrates onto base, so a leak corrupts every later merge: the task is
+    blocked, a leak.json marker is written, nothing is integrated, BaseBranchLeak is
+    raised to HALT, and NO reaped.json is written (re-runs keep flagging until base is
+    cleaned)."""
     paths = setup(git_repo)
     add_task(paths, "task-001")
     base0 = head(git_repo)
     make_worktree(paths, "sess-task-001", "task-001", "main")
-    # the agent escaped: committed straight onto main in the base checkout
-    (git_repo / "swept.py").write_text("oops = True\n")
-    git(git_repo, "add", "-A")
-    git(git_repo, "commit", "-q", "-m", "escaped commit on main")
-    leaked_head = head(git_repo)
+    leaked_head = _leak_onto_base(git_repo, git, base0)
     sdir = make_leak_session(paths, git, "task-001", base_sha=base0)
 
     with pytest.raises(BaseBranchLeak):
         loop_mod.reap_session(sdir, Config(integration="auto-merge"), paths)
 
     assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
-    assert (sdir / "leak.json").exists()
     leak = json.loads((sdir / "leak.json").read_text())
     assert leaked_head in leak["commits"]
-    # not integrated and not marked reaped: base must not be merged onto, and a re-run
-    # must keep flagging until a human cleans base.
-    assert head(git_repo) == leaked_head  # no integration merge added
-    assert not (sdir / "reaped.json").exists()
+    assert head(git_repo) == leaked_head        # no integration merge added
+    assert not (sdir / "reaped.json").exists()  # un-reaped: re-runs keep flagging
+
+
+def test_reap_detects_leak_in_pr_mode_blocks_task_without_halting(git_repo, git):
+    """pr/branch mode never integrates onto base, so a leak can't corrupt other sessions:
+    the offending task is blocked and a leak.json marker written, but reap returns normally
+    (NO BaseBranchLeak) and writes reaped.json so the run continues and the session isn't
+    re-flagged every pass — a concurrent commit to base must not halt unrelated work."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    base0 = head(git_repo)
+    make_worktree(paths, "sess-task-001", "task-001", "main")
+    leaked_head = _leak_onto_base(git_repo, git, base0)
+    sdir = make_leak_session(paths, git, "task-001", base_sha=base0)
+
+    # does not raise, and reports it acted
+    assert loop_mod.reap_session(sdir, Config(integration="branch"), paths) is True
+
+    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+    leak = json.loads((sdir / "leak.json").read_text())
+    assert leaked_head in leak["commits"] and leak["integration"] == "branch"
+    reaped = json.loads((sdir / "reaped.json").read_text())
+    assert reaped["integrated"] is False and reaped["leak"] == leak["commits"]
+    # idempotent: a second reap is a no-op (does not re-raise or re-act)
+    assert loop_mod.reap_session(sdir, Config(integration="branch"), paths) is False
 
 
 def test_clean_session_reaps_normally_with_base_sha(git_repo, git):
