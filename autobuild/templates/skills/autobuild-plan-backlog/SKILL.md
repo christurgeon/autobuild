@@ -19,8 +19,9 @@ point the user at the **autobuild-author-goal** skill first.
 
 ## Process
 
-1. **Read `GOAL.md`** — mission, definition of done, constraints, non-goals. Everything
-   you plan must serve the definition of done and stay inside the "MAY change" boundary.
+1. **Read `GOAL.md`** — mission, scale & operational assumptions, definition of done,
+   constraints, non-goals. Everything you plan must serve the definition of done, fit the
+   scale envelope, and stay inside the "MAY change" boundary.
 2. **Explore the codebase** — structure, existing patterns, and the build/test commands
    (you'll reference them in acceptance criteria). Read `.autobuild/config.yml` to see the
    project's actual configured `checks:`.
@@ -46,6 +47,12 @@ point the user at the **autobuild-author-goal** skill first.
      would touch 3+ unrelated areas, or needs two distinct test suites, split it. Assign a
      **cross-cutting criterion** (e.g. an end-to-end test spanning several pieces) to a
      single owning task that `depends_on` all the pieces it exercises.
+   - **Let scale drive the backlog.** Size the work to `GOAL.md`'s scale envelope.
+     Small/simple scale → do **not** create infrastructure tasks (caching, queues, sharding,
+     autoscaling) the goal doesn't call for; prefer the simplest thing that meets the DoD.
+     Larger scale → make sure load/performance, observability, and capacity each have an
+     owning task. Don't invent scaling work the envelope doesn't justify, and don't omit it
+     when the envelope demands it.
 5. **Self-lint before writing** (the folded-in backlog check). Verify and fix:
    - no dependency **cycles**; every `depends_on` id **exists**;
    - no task obviously **too big** for one session (split it) or **untestable** (vague
@@ -54,6 +61,9 @@ point the user at the **autobuild-author-goal** skill first.
    - **coverage** — every Definition-of-Done bullet in `GOAL.md` is satisfied by at least
      one task, and no task falls outside the goal. This is the check that tells you the
      backlog actually *achieves* the goal.
+   - **scale fit** — no task over- or under-builds relative to `GOAL.md`'s scale envelope:
+     no gold-plated infra the magnitude doesn't justify, and no missing capacity/perf work
+     the magnitude demands.
    Report what you found and fixed.
 6. **Present, then write.** Show the proposed backlog as a compact list — `id · title ·
    depends_on · one-line goal` — and get approval (if non-interactive, write it and flag

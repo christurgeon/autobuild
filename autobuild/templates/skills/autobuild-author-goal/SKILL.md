@@ -1,6 +1,6 @@
 ---
 name: autobuild-author-goal
-description: Use when setting up an autobuild project and you need to write or improve GOAL.md — the stable north star (mission, project-level definition of done, constraints / area-of-control, non-goals) that every autobuild session reads each iteration. Triggers on "write the GOAL", "create/generate GOAL.md", "set up autobuild's goal", "what should my GOAL.md say".
+description: Use when setting up an autobuild project and you need to write or improve GOAL.md — the stable north star (mission, scale & operational assumptions, project-level definition of done, constraints / area-of-control, non-goals) that every autobuild session reads each iteration. Triggers on "write the GOAL", "create/generate GOAL.md", "set up autobuild's goal", "set the scale/assumptions", "what should my GOAL.md say".
 ---
 
 # autobuild: author GOAL.md
@@ -22,13 +22,22 @@ and it should rarely change. Keep it tight, stable, and testable.
 2. **Understand the project.** Skim the README, the package manifest, and the top-level
    directory layout so your questions are grounded in what's actually here. Anything the
    README/manifest already answers, don't ask about — confirm it.
-3. **Interview the user — efficiently.** Fill the four sections below. Prefer
+3. **Interview the user — efficiently.** Fill the sections below. Prefer
    multiple-choice. **Batch trivially-related questions** (e.g. the whole API/behavior
    contract can be one block: "here's the obvious contract — tweak anything?"), skip what
    the docs already answer, and aim for **≤4 exchanges on a small single-service
    project**. Don't run a long one-question-at-a-time interrogation when the project is
    small.
    - **Mission** — one or two sentences: what are we building, and for whom?
+   - **Scale & operational assumptions** — the operating envelope: roughly how many users /
+     how much traffic, how much data, what latency/availability is needed, and the growth
+     horizon. **Ask explicitly** — users rarely volunteer it — with order-of-magnitude
+     choices, *smallest first* (≈100 → ≈10k → ≈100k+). "Small, optimize for simplicity" is
+     a legitimate answer that stops sessions over-engineering; capture only NFRs that
+     actually change architecture, and the **magnitude, not the mechanism**. To respect the
+     exchange budget, on an obviously-small project *propose* the small envelope as a
+     one-line confirm ("looks like ~100 users, optimize for simplicity — right?") instead of
+     a separate question; only ask the full question when scale is genuinely open.
    - **Definition of done (project level)** — a concrete, *checkable* checklist. "Users
      can shorten and resolve a URL via the API" beats "the API works".
    - **Constraints** — the compact area-of-control: what agents **MAY** change, and what
@@ -47,6 +56,12 @@ and it should rarely change. Keep it tight, stable, and testable.
 
 ## Mission
 <one or two sentences: what, and for whom>
+
+## Scale & operational assumptions
+- Users / traffic: <order of magnitude, e.g. ~100 users, low traffic>
+- Data volume: <e.g. thousands of rows, not millions>
+- Latency / availability: <e.g. best-effort; brief downtime OK>
+- Growth horizon: <build for current scale | plan for N× growth>
 
 ## Definition of done (project level)
 - [ ] <concrete, checkable outcome>
@@ -67,6 +82,14 @@ and it should rarely change. Keep it tight, stable, and testable.
 - **Keep design/config detail OUT of the GOAL** — host/base-URL, code length, algorithms,
   schema choices are *task-level*, not goal-level. The GOAL says *what done looks like*,
   not *how*.
+- **Scale is the one exception to that rule.** The operating envelope (magnitude, data
+  volume, latency/availability, growth horizon) *is* goal-level — it's stable and constrains
+  every downstream choice. What stays task-level is the *mechanism* that satisfies it (which
+  database, whether to add a cache). State the **magnitude, not the mechanism**.
+- **Scale magnitude must be concrete, not a vibe.** An order of magnitude (~100 vs ~100k),
+  not "scalable"/"fast"; a growth horizon that picks a posture ("build for current scale" or
+  "plan for N× growth"), not "could grow someday". "Best-effort, brief downtime OK" is a
+  fine availability answer.
 - Constraints name real boundaries (paths, layers, external systems) — this is what keeps
   sessions inside their lane.
 - **If a DoD item implies a check that `.autobuild/config.yml`'s `checks:` doesn't yet

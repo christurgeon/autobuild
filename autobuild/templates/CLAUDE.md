@@ -17,6 +17,9 @@ Follow these phases **in order**. Do not skip straight to code.
 - Write a concrete, step-by-step plan to `<session-dir>/plan.md`.
 - List the files you expect to touch. Stay inside the "Agents MAY change" boundary
   from `GOAL.md`.
+- Fit `GOAL.md`'s "Scale & operational assumptions" envelope — build for the stated
+  magnitude. Don't introduce scaling infrastructure (caches, queues, sharding, extra
+  services) it doesn't call for, and don't under-build below it.
 
 ### 2. Review
 - Critique your own plan against the acceptance criteria and `GOAL.md` constraints.
