@@ -10,6 +10,13 @@ Build **quotes-api**, a small, well-tested FastAPI service that serves random qu
 lets a client add new ones. It should be something a developer could clone and run in under
 a minute, with clear OpenAPI docs.
 
+## Scale & operational assumptions
+
+- Users / traffic: a handful of developers; low, bursty traffic.
+- Data volume: hundreds–thousands of quotes.
+- Latency / availability: best-effort; brief downtime is fine.
+- Growth horizon: stays small — no growth planned; optimize for simplicity, not scale.
+
 ## Definition of done (project level)
 
 - [ ] `uvicorn quotes_api.main:app` starts and `GET /health` returns `{"status": "ok"}`.

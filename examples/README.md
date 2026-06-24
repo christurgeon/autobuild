@@ -10,7 +10,7 @@ but with a dependency graph rich enough to show autobuild actually fanning out.
 
 ```
 quotes-api/
-  GOAL.md                     <- the north star, filled in (mission, definition of done, constraints)
+  GOAL.md                     <- the north star, filled in (mission, scale, definition of done, constraints)
   .autobuild/
     config.yml                <- real checks (ruff + pytest), integration: pr
   tasks/

@@ -8,6 +8,18 @@
 
 <!-- One or two sentences. What are we building and for whom? -->
 
+## Scale & operational assumptions
+
+<!-- The operating envelope every design choice must fit. Goal-level (stable, shapes the
+     "how") — not task-level mechanism. Be honest about the real magnitude: "small,
+     optimize for simplicity" is a valid answer that stops agents over-building. List only
+     NFRs that actually change architecture, and state the magnitude, not the mechanism
+     (which database / cache / queue is task-level). -->
+- Users / traffic:
+- Data volume:
+- Latency / availability:
+- Growth horizon:
+
 ## Definition of done (project level)
 
 <!-- How do we know the whole project is finished? Be concrete and testable. -->
