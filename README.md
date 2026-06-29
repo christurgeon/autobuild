@@ -159,6 +159,11 @@ verify_checks: true           # reaper re-runs `checks` in the worktree before
                               # the task and keeps its branch (trust, but verify).
                               # false -> trust the agent, skip the re-run.
 
+verify_after_merge: true      # auto-merge only: after a clean merge, re-run `checks`
+                              # on the COMBINED base tree (catches semantic skew two
+                              # green branches can't); on failure the merge is reverted
+                              # and the task blocked. false -> land merges unverified.
+
 claude_cmd: claude            # override if your CLI binary is named differently
 
 dangerously_bypass_permissions: true  # DEFAULT: full --dangerously-skip-permissions ...

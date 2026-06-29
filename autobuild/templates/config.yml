@@ -34,6 +34,13 @@ checks:
 # Set to false to trust the agent and skip the harness-side re-run (not recommended).
 verify_checks: true
 
+# auto-merge only: after a clean `--no-ff` merge, re-run `checks` against the COMBINED
+# base tree. Two green branches can still merge into a red base with no textual conflict
+# (semantic skew) — this catches that. On failure the merge is reverted (base hard-reset
+# to its pre-merge HEAD) and the task is `blocked` with its branch kept (see
+# <session>/post-merge-checks.log). Set to false to land merges without the combined re-run.
+verify_after_merge: true
+
 claude_cmd: claude            # override if your Claude CLI binary differs
 
 # --- session permission posture ---------------------------------------------
