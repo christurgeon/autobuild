@@ -23,6 +23,8 @@ class Config:
     base_branch: str = "main"
     max_iterations: int = 100
     integration: str = "pr"  # pr | auto-merge | branch
+    integration_max_retries: int = 2  # int >= 0; extra attempts for transient remote ops
+                                      # (git push / gh pr create) during integration
     checks: list[str] = field(default_factory=list)
     verify_checks: bool = True  # re-run checks in the reaper before integrating
     verify_after_merge: bool = True  # re-run checks on the COMBINED base tree after an
@@ -157,6 +159,8 @@ def load_config(path: Path) -> Config:
     max_iterations = want_int("max_iterations", defaults.max_iterations)
 
     integration = want_enum("integration", defaults.integration, VALID_INTEGRATIONS)
+    integration_max_retries = want_int("integration_max_retries",
+                                       defaults.integration_max_retries, minimum=0)
     checks = want_str_list("checks", defaults.checks)
     verify_checks = want_bool("verify_checks", defaults.verify_checks)
     verify_after_merge = want_bool("verify_after_merge", defaults.verify_after_merge)
@@ -183,6 +187,7 @@ def load_config(path: Path) -> Config:
         base_branch=base_branch,
         max_iterations=max_iterations,
         integration=integration,
+        integration_max_retries=integration_max_retries,
         checks=checks,
         verify_checks=verify_checks,
         verify_after_merge=verify_after_merge,

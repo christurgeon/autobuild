@@ -356,6 +356,37 @@ def test_timeout_max_retries_bool_raises(tmp_path):
     assert "timeout_max_retries" in str(e.value)
 
 
+# --- integration auto-retry: integration_max_retries (min 0, like timeout_max_retries) --
+
+def test_integration_max_retries_defaults_to_two(tmp_path):
+    assert load_config(tmp_path / "nope.yml").integration_max_retries == 2
+
+
+def test_integration_max_retries_zero_is_allowed(tmp_path):
+    # 0 = "single attempt, no retries" — a legitimate value the >= 1 ints reject.
+    cfg = load_config(_write(tmp_path, "integration_max_retries: 0\n"))
+    assert cfg.integration_max_retries == 0
+
+
+def test_integration_max_retries_negative_raises(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, "integration_max_retries: -1\n"))
+    assert "integration_max_retries" in str(e.value)
+
+
+def test_integration_max_retries_non_int_raises(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, "integration_max_retries: lots\n"))
+    assert "integration_max_retries" in str(e.value)
+
+
+def test_integration_max_retries_bool_raises(tmp_path):
+    # bool is an int subclass; must be rejected like the other int knobs
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, "integration_max_retries: true\n"))
+    assert "integration_max_retries" in str(e.value)
+
+
 def test_config_error_names_path(tmp_path):
     p = _write(tmp_path, "integration: nope\n")
     with pytest.raises(ConfigError) as e:

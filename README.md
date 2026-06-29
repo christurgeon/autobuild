@@ -150,6 +150,10 @@ integration: pr               # pr | auto-merge | branch
                               #   auto-merge-> if checks pass, merge the branch
                               #   branch    -> just leave the branch; you merge later
 
+integration_max_retries: 2    # (pr mode) extra attempts with backoff for a transient
+                              # push / `gh pr create` hiccup (int >= 0; 0 = single shot).
+                              # Auth / no-remote / merge conflicts stay un-retried.
+
 checks:                       # run after implement; must all pass to commit/finish
   - npm run typecheck
   - npm run lint

@@ -13,6 +13,12 @@ max_iterations: 100           # integer >= 1: global safety stop for the outer l
 #   branch     -> leave the branch; a human merges later
 integration: pr
 
+# In `pr` mode, a transient network blip or GitHub rate-limit during integration (the
+# `git push` and `gh pr create` steps) is retried with increasing backoff (1s, 2s, …)
+# instead of being turned into a spurious "no PR" outcome. Deterministic failures (auth,
+# no remote, merge conflict) stay single-shot. 0 = no retries (single attempt).
+integration_max_retries: 2    # integer >= 0: extra attempts for transient push/PR-open ops
+
 # Worktree isolation (no config keys — controlled by env vars, like AUTOBUILD_SANDBOX):
 # each session works only in its own git worktree, never on base_branch.
 #  - `autobuild run` REFUSES TO START if base_branch's working tree has uncommitted source

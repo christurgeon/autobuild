@@ -1,6 +1,7 @@
 import json
 import os
 import signal
+import subprocess
 import time
 
 import pytest
@@ -159,6 +160,200 @@ def test_reap_pr_mode_without_gh_leaves_branch_and_marks_done(git_repo, monkeypa
     monkeypatch.setattr(loop_mod, "which", lambda name: None)  # gh absent
     reap_session(paths.sessions_dir / "sess-task-001", Config(integration="pr"), paths)
     assert read_task(paths.tasks_dir / "task-001.md").status == "done"
+
+
+# ---- integration retry-with-backoff (pr mode: push + gh pr create) ----------
+
+def _cp(returncode=0, stdout="", stderr=""):
+    """A stand-in subprocess.CompletedProcess for stubbing _git / _gh."""
+    return subprocess.CompletedProcess(args=[], returncode=returncode,
+                                       stdout=stdout, stderr=stderr)
+
+
+def _pr_integrate(monkeypatch, paths, *, git_fn, gh_fn, retries=2):
+    """Run integrate() in pr mode with gh present and stubbed _git/_gh seams; capture
+    the injected backoff sleeps. Returns (success, detail, slept)."""
+    monkeypatch.setattr(loop_mod, "which", lambda name: "gh")
+    monkeypatch.setattr(loop_mod, "_git", git_fn)
+    monkeypatch.setattr(loop_mod, "_gh", gh_fn)
+    sdir = paths.sessions_dir / "s"
+    sdir.mkdir(parents=True, exist_ok=True)
+    slept: list[int] = []
+    success, detail = loop_mod.integrate(
+        "task-001", Config(integration="pr", integration_max_retries=retries),
+        paths, sdir, sleep=slept.append)
+    return success, detail, slept
+
+
+def test_integrate_pr_push_retries_once_then_succeeds(git_repo, monkeypatch):
+    paths = setup(git_repo)
+    pushes = {"n": 0}
+
+    def git_fn(root, *args):
+        if args[:1] == ("push",):
+            pushes["n"] += 1
+            if pushes["n"] == 1:  # transient blip on the first try
+                return _cp(1, stderr="fatal: unable to access ...: Could not resolve host github.com")
+            return _cp(0)
+        return _cp(0)
+
+    success, detail, slept = _pr_integrate(
+        monkeypatch, paths, git_fn=git_fn, gh_fn=lambda root, *a: _cp(0))
+    assert success and detail == "opened PR for autobuild/task-001"
+    assert pushes["n"] == 2     # one retry after the blip
+    assert slept == [1]         # a single 1s backoff before the retry
+
+
+def test_integrate_pr_push_permanent_failure_is_single_shot(git_repo, monkeypatch):
+    paths = setup(git_repo)
+    pushes = {"n": 0}
+
+    def git_fn(root, *args):
+        if args[:1] == ("push",):
+            pushes["n"] += 1
+            return _cp(1, stderr="fatal: 'origin' does not appear to be a git repository")
+        return _cp(0)
+
+    success, detail, slept = _pr_integrate(
+        monkeypatch, paths, git_fn=git_fn, gh_fn=lambda root, *a: _cp(0))
+    # auth/no-remote is permanent -> not retried, falls back to today's exact message
+    assert success
+    assert detail == "push failed for autobuild/task-001; kept locally, no PR opened (check remote/auth)"
+    assert pushes["n"] == 1
+    assert slept == []
+
+
+def test_integrate_pr_push_transient_exhausted_falls_back(git_repo, monkeypatch):
+    paths = setup(git_repo)
+    pushes = {"n": 0}
+    gh_calls = {"n": 0}
+
+    def git_fn(root, *args):
+        if args[:1] == ("push",):
+            pushes["n"] += 1
+            return _cp(1, stderr="error: connection timed out")  # transient, never recovers
+        return _cp(0)
+
+    def gh_fn(root, *args):
+        gh_calls["n"] += 1
+        return _cp(0)
+
+    success, detail, slept = _pr_integrate(monkeypatch, paths, git_fn=git_fn, gh_fn=gh_fn)
+    assert success
+    assert detail == "push failed for autobuild/task-001; kept locally, no PR opened (check remote/auth)"
+    assert pushes["n"] == 3      # 1 + 2 retries, capped
+    assert slept == [1, 2]       # increasing backoff before each retry
+    assert gh_calls["n"] == 0    # never reached the PR-open step
+
+
+def test_integrate_pr_create_already_exists_is_success_no_duplicate(git_repo, monkeypatch):
+    paths = setup(git_repo)
+    gh_calls = {"create": 0, "list": 0}
+
+    def gh_fn(root, *args):
+        if args[:2] == ("pr", "create"):
+            gh_calls["create"] += 1
+            return _cp(1, stderr=(
+                'a pull request for branch "autobuild/task-001" into branch "main" '
+                'already exists:\nhttps://github.com/x/y/pull/7'))
+        if args[:2] == ("pr", "list"):
+            gh_calls["list"] += 1
+            return _cp(0, stdout="[]")
+        return _cp(0)
+
+    success, detail, slept = _pr_integrate(
+        monkeypatch, paths, git_fn=lambda root, *a: _cp(0), gh_fn=gh_fn)
+    assert success and detail == "PR already exists for autobuild/task-001"
+    assert gh_calls["create"] == 1   # gh's own "already exists" -> success, NOT retried
+    assert gh_calls["list"] == 0     # short-circuited on stderr, no list needed
+    assert slept == []               # no duplicate, no backoff
+
+
+def test_integrate_pr_create_detects_existing_pr_via_list(git_repo, monkeypatch):
+    paths = setup(git_repo)
+    gh_calls = {"create": 0, "list": 0}
+
+    def gh_fn(root, *args):
+        if args[:2] == ("pr", "create"):
+            gh_calls["create"] += 1
+            return _cp(1, stderr="error: failed to create pull request")  # opaque failure
+        if args[:2] == ("pr", "list"):
+            gh_calls["list"] += 1
+            return _cp(0, stdout='[{"url": "https://github.com/x/y/pull/9"}]')  # a PR exists
+        return _cp(0)
+
+    success, detail, slept = _pr_integrate(
+        monkeypatch, paths, git_fn=lambda root, *a: _cp(0), gh_fn=gh_fn)
+    assert success and detail == "PR already exists for autobuild/task-001"
+    assert gh_calls["create"] == 1   # found via list -> treated as success, not retried
+    assert gh_calls["list"] == 1
+    assert slept == []
+
+
+def test_integrate_pr_create_retries_exhausted_falls_back(git_repo, monkeypatch):
+    paths = setup(git_repo)
+    gh_calls = {"create": 0, "list": 0}
+
+    def gh_fn(root, *args):
+        if args[:2] == ("pr", "create"):
+            gh_calls["create"] += 1
+            return _cp(1, stderr="error: server returned HTTP 502")  # transient
+        if args[:2] == ("pr", "list"):
+            gh_calls["list"] += 1
+            return _cp(0, stdout="[]")  # no existing PR
+        return _cp(0)
+
+    success, detail, slept = _pr_integrate(
+        monkeypatch, paths, git_fn=lambda root, *a: _cp(0), gh_fn=gh_fn)
+    # exhausted -> today's exact (success, message): branch pushed, human can open the PR
+    assert success
+    assert detail == "PR creation failed for autobuild/task-001; pushed branch left for manual PR"
+    assert gh_calls["create"] == 3   # 1 + 2 retries, no more
+    assert slept == [1, 2]
+
+
+def test_integrate_pr_zero_retries_is_single_attempt(git_repo, monkeypatch):
+    paths = setup(git_repo)
+    gh_calls = {"create": 0}
+
+    def gh_fn(root, *args):
+        if args[:2] == ("pr", "create"):
+            gh_calls["create"] += 1
+            return _cp(1, stderr="error: server returned HTTP 502")
+        if args[:2] == ("pr", "list"):
+            return _cp(0, stdout="[]")
+        return _cp(0)
+
+    success, detail, slept = _pr_integrate(
+        monkeypatch, paths, git_fn=lambda root, *a: _cp(0), gh_fn=gh_fn, retries=0)
+    assert success
+    assert detail == "PR creation failed for autobuild/task-001; pushed branch left for manual PR"
+    assert gh_calls["create"] == 1   # 0 retries -> a single attempt
+    assert slept == []
+
+
+def test_integrate_auto_merge_conflict_is_not_retried(git_repo, monkeypatch, diverging_dep):
+    # The auto-merge conflict path stays single-shot: no sleep, one merge attempt.
+    paths = setup(git_repo)
+    dep = diverging_dep(git_repo)            # main and autobuild/<dep> conflict on a line
+    merges = {"n": 0}
+    real_git = loop_mod._git
+
+    def git_fn(root, *args):
+        if args[:1] == ("merge",) and "--abort" not in args:
+            merges["n"] += 1
+        return real_git(root, *args)
+
+    monkeypatch.setattr(loop_mod, "_git", git_fn)
+    sdir = paths.sessions_dir / "s"
+    sdir.mkdir(parents=True, exist_ok=True)
+    slept: list[int] = []
+    success, detail = loop_mod.integrate(
+        dep, Config(integration="auto-merge", integration_max_retries=2),
+        paths, sdir, sleep=slept.append)
+    assert success is False and "conflict" in detail
+    assert merges["n"] == 1   # single-shot
+    assert slept == []
 
 
 # ---- checks verification gate ----------------------------------------------
