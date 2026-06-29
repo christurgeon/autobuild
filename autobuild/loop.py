@@ -800,6 +800,11 @@ def _assert_base_clean(paths: Paths) -> None:
 def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float) -> None:
     paths.ensure_runtime_dirs()
     _assert_base_clean(paths)
+    # Critical preflight (claude on PATH, git identity) BEFORE claiming or spawning, so a
+    # misconfigured host aborts early with one clear message instead of N wasted sessions.
+    # Imported lazily: preflight imports loop's helpers, so a top-level import would cycle.
+    from .preflight import assert_run_preflight
+    assert_run_preflight(paths, config)
     log(f"starting loop (max_parallel={config.max_parallel}, max_iterations={config.max_iterations})")
     reconcile(paths, sweep_in_progress=True)
 

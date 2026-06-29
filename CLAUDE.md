@@ -123,6 +123,13 @@ Module responsibilities:
   `config.integration`: in `auto-merge` (deliverables merge onto base) it raises `BaseBranchLeak`
   to halt the whole run; in `pr`/`branch` (base is never integrated onto) it blocks just that task
   and continues. Either way it writes a `leak.json` marker.
+- **`autobuild/preflight.py`** — `autobuild doctor`: cheap, side-effect-free environment
+  checks each returning `(level, name, detail)` (PASS/WARN/FAIL). `doctor` prints a report
+  and exits non-zero if any check FAILs (WARN never fails); `assert_run_preflight` runs the
+  **critical** subset (`claude` on PATH + git identity) at the start of `_run_locked`, before
+  claiming or spawning, raising `PreflightError` so a misconfigured host aborts early instead
+  of wasting sessions. doctor only *reports* (the base-tree-clean check is a WARN); `run` keeps
+  enforcing via `_assert_base_clean`. Imports loop helpers, so loop imports it lazily.
 - **`autobuild/paths.py`** — the frozen `Paths` dataclass.
 
 ### The session lifecycle / sentinel protocol (the core data flow)

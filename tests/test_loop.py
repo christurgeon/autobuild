@@ -412,9 +412,10 @@ def test_second_run_refused_while_run_lock_held(git_repo):
     assert list(paths.sessions_dir.iterdir()) == []
 
 
-def test_run_lock_released_after_run_returns(git_repo):
+def test_run_lock_released_after_run_returns(git_repo, stub_bin):
     """The lock is advisory and released when the run ends, so a later run can
     re-acquire it (flock auto-release is the crash semantic we rely on)."""
+    stub_bin()  # claude on PATH so the run's critical preflight passes
     paths = setup(git_repo)
     loop_mod.run(paths, Config(integration="branch"), sleep_seconds=0)  # no tasks -> returns
     with loop_mod.run_lock(paths.run_lock):  # would raise if still held
@@ -463,9 +464,10 @@ def test_reap_alongside_run_leaves_live_session_process_and_worktree(git_repo):
         proc.wait()
 
 
-def test_fresh_run_reconciles_orphaned_in_progress_after_crash(git_repo):
+def test_fresh_run_reconciles_orphaned_in_progress_after_crash(git_repo, stub_bin):
     """After a run is killed (lock auto-released), a fresh run takes the lock and
     reconciles orphaned in-progress sessions to blocked — crash recovery works."""
+    stub_bin()  # claude on PATH so the run's critical preflight passes
     paths = setup(git_repo)
     add_task(paths, "task-001", status="in-progress")
     sdir = paths.sessions_dir / "sess-orphan"
@@ -1033,9 +1035,10 @@ def test_one_dead_group_does_not_abort_harvest_of_others(git_repo):
     assert read_task(paths.tasks_dir / "task-002.md").status == "done"
 
 
-def test_run_settles_with_parked_timeout_task(git_repo):
+def test_run_settles_with_parked_timeout_task(git_repo, stub_bin):
     """A terminal `timeout` task (retries exhausted) lets the loop settle cleanly, not
     spin to max_iterations."""
+    stub_bin()  # claude on PATH so the run's critical preflight passes
     paths = setup(git_repo)
     add_task(paths, "task-001", status="timeout")
     loop_mod.run(paths, Config(integration="branch"), sleep_seconds=0)  # must return
@@ -1087,8 +1090,9 @@ def test_collect_status_tolerates_non_dict_result(git_repo):
     assert any(s["session"] == "sess-x" for s in report["sessions"])
 
 
-def test_run_survives_poisoned_sentinel(git_repo):
+def test_run_survives_poisoned_sentinel(git_repo, stub_bin):
     """A non-dict result.json must not crash run() at startup (reconcile -> reap_all)."""
+    stub_bin()  # claude on PATH so the run's critical preflight passes
     paths = setup(git_repo)
     sdir = paths.sessions_dir / "sess-poison"
     sdir.mkdir(parents=True)
