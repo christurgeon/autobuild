@@ -131,6 +131,7 @@ single-task session never invokes one. Re-running `autobuild init` won't clobber
 | Command | What it does |
 |---|---|
 | `autobuild init` | Copy `GOAL.md`, `CLAUDE.md`, `tasks/`, and `.autobuild/config.yml` into the current project, and install the [authoring/operating skills](#authoring-skills) under `.claude/skills/`. |
+| `autobuild doctor` | Preflight the environment (`claude` on PATH, git identity, base branch, disk, `gh` auth): PASS/WARN/FAIL report, exits non-zero on any FAIL. `run` enforces the critical checks itself. |
 | `autobuild run` | Run the outer loop: schedule → spawn sessions in worktrees → reap. Repeats until done. |
 | `autobuild status` | Print every task's status and any in-flight sessions. |
 | `autobuild reap` | One-shot: collect finished sessions, update tasks, open PRs / merge per config. |
@@ -162,6 +163,11 @@ verify_checks: true           # reaper re-runs `checks` in the worktree before
                               # integrating a COMPLETE session; any failure blocks
                               # the task and keeps its branch (trust, but verify).
                               # false -> trust the agent, skip the re-run.
+
+verify_after_merge: true      # auto-merge only: after a clean merge, re-run `checks`
+                              # on the COMBINED base tree (catches semantic skew two
+                              # green branches can't); on failure the merge is reverted
+                              # and the task blocked. false -> land merges unverified.
 
 claude_cmd: claude            # override if your CLI binary is named differently
 

@@ -123,6 +123,13 @@ Module responsibilities:
   `config.integration`: in `auto-merge` (deliverables merge onto base) it raises `BaseBranchLeak`
   to halt the whole run; in `pr`/`branch` (base is never integrated onto) it blocks just that task
   and continues. Either way it writes a `leak.json` marker.
+- **`autobuild/preflight.py`** — `autobuild doctor`: cheap, side-effect-free environment
+  checks each returning `(level, name, detail)` (PASS/WARN/FAIL). `doctor` prints a report
+  and exits non-zero if any check FAILs (WARN never fails); `assert_run_preflight` runs the
+  **critical** subset (`claude` on PATH + git identity) at the start of `_run_locked`, before
+  claiming or spawning, raising `PreflightError` so a misconfigured host aborts early instead
+  of wasting sessions. doctor only *reports* (the base-tree-clean check is a WARN); `run` keeps
+  enforcing via `_assert_base_clean`. Imports loop helpers, so loop imports it lazily.
 - **`autobuild/paths.py`** — the frozen `Paths` dataclass.
 
 ### The session lifecycle / sentinel protocol (the core data flow)
@@ -144,7 +151,11 @@ This is the part that requires reading multiple files to understand:
    `pr`/`branch` — just blocks that task and lets the run continue. Otherwise, for
    `COMPLETE` it **verifies first**: unless
    `verify_checks: false`, it re-runs `config.checks` against the session's worktree and, if any
-   fail, blocks the task and keeps the branch instead of integrating (trust, but verify). If they
+   fail, blocks the task and keeps the branch instead of integrating (trust, but verify). For
+   `auto-merge` a second gate (`_post_merge_verify`, opt-out `verify_after_merge`) re-runs the
+   checks against the **combined base tree** after the `--no-ff` merge and **hard-resets base back
+   to its pre-merge HEAD** if they fail — catching semantic merge skew two independently-green
+   branches can produce with no textual conflict. If they
    pass it **integrates** (`integrate` → `pr` via `gh` / `auto-merge` / `branch`) and only then
    `set_status`es the task `done` — so a failed auto-merge leaves the task `blocked`, not falsely
    `done`. `BLOCKED`/`NEEDS_HUMAN` set the task `blocked`; a synthetic `TIMEOUT` is never integrated

@@ -276,7 +276,8 @@ def test_run_refuses_dirty_base(git_repo, monkeypatch):
         loop_mod.run(paths, Config(base_branch="main"))
 
 
-def test_run_dirty_base_override_env(git_repo, monkeypatch):
+def test_run_dirty_base_override_env(git_repo, monkeypatch, stub_bin):
+    stub_bin()  # claude on PATH so the run's critical preflight passes past the override
     paths = setup(git_repo)
     (git_repo / "uncommitted.py").write_text("x = 1\n")
     monkeypatch.setenv("AUTOBUILD_ALLOW_DIRTY_BASE", "1")

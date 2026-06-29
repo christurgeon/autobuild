@@ -176,10 +176,12 @@ def _pr_integrate(monkeypatch, paths, *, git_fn, gh_fn, retries=2):
     monkeypatch.setattr(loop_mod, "which", lambda name: "gh")
     monkeypatch.setattr(loop_mod, "_git", git_fn)
     monkeypatch.setattr(loop_mod, "_gh", gh_fn)
+    sdir = paths.sessions_dir / "s"
+    sdir.mkdir(parents=True, exist_ok=True)
     slept: list[int] = []
     success, detail = loop_mod.integrate(
         "task-001", Config(integration="pr", integration_max_retries=retries),
-        paths, sleep=slept.append)
+        paths, sdir, sleep=slept.append)
     return success, detail, slept
 
 
@@ -343,10 +345,12 @@ def test_integrate_auto_merge_conflict_is_not_retried(git_repo, monkeypatch, div
         return real_git(root, *args)
 
     monkeypatch.setattr(loop_mod, "_git", git_fn)
+    sdir = paths.sessions_dir / "s"
+    sdir.mkdir(parents=True, exist_ok=True)
     slept: list[int] = []
     success, detail = loop_mod.integrate(
         dep, Config(integration="auto-merge", integration_max_retries=2),
-        paths, sleep=slept.append)
+        paths, sdir, sleep=slept.append)
     assert success is False and "conflict" in detail
     assert merges["n"] == 1   # single-shot
     assert slept == []
@@ -408,7 +412,10 @@ def test_verify_checks_false_bypasses_gate(git_repo, git):
     add_task(paths, "task-001")
     _worktree_with_commit(paths, git, broken=True)  # would fail the check...
     sdir = make_session(paths, "task-001", "COMPLETE", commit="x")
-    cfg = Config(integration="auto-merge", checks=["test ! -f BROKEN"], verify_checks=False)
+    # verify_after_merge disabled too: this test exercises the PRE-merge bypass in
+    # isolation, without the orthogonal post-merge gate catching the broken combined tree.
+    cfg = Config(integration="auto-merge", checks=["test ! -f BROKEN"],
+                 verify_checks=False, verify_after_merge=False)
 
     assert reap_session(sdir, cfg, paths) is True
     # ...but the gate is disabled, so today's trust-the-agent behavior: merged + done
@@ -454,6 +461,75 @@ def test_failing_check_reap_is_idempotent(git_repo, git):
     # second pass is a no-op: the reaped.json guard prevents re-running checks
     assert reap_session(sdir, cfg, paths) is False
     assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+
+
+# ---- post-merge combined-tree verification (semantic skew) -----------------
+
+# A check that passes on either branch ALONE but fails on the COMBINED base: it trips
+# only once both feature.txt (from the session branch) and trigger.txt (from base) exist.
+_SKEW_CHECK = r"test ! \( -f feature.txt -a -f trigger.txt \)"
+
+
+def _skew_setup(paths, git):
+    """Engineer semantic merge skew with no textual conflict: the session worktree forks
+    from main and commits feature.txt (passes _SKEW_CHECK alone); base THEN gains a disjoint
+    trigger.txt (clean merge), so the merged tree has both files and fails _SKEW_CHECK."""
+    wt = make_worktree(paths, "sess-task-001", "task-001", "main")
+    (wt / "feature.txt").write_text("hi")
+    git(wt, "add", "-A")
+    git(wt, "commit", "-q", "-m", "feature work")
+    (paths.root / "trigger.txt").write_text("t")        # base diverges AFTER the fork
+    git(paths.root, "add", "-A")
+    git(paths.root, "commit", "-q", "-m", "main adds trigger")
+    return make_session(paths, "task-001", "COMPLETE", commit="x")
+
+
+def test_post_merge_checks_failure_reverts_and_blocks(git_repo, git):
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    sdir = _skew_setup(paths, git)
+    pre_merge = git(git_repo, "rev-parse", "HEAD").stdout.strip()
+    cfg = Config(integration="auto-merge", checks=[_SKEW_CHECK])
+
+    assert reap_session(sdir, cfg, paths) is True
+    # merge reverted: base back at its pre-merge HEAD, no merge commit left behind
+    assert git(git_repo, "rev-parse", "HEAD").stdout.strip() == pre_merge
+    assert "merge task-001" not in git(git_repo, "log", "--oneline", "main").stdout
+    # task blocked, branch preserved, forensic log written
+    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+    assert _branch_exists(git, git_repo, "task-001")
+    assert (sdir / "post-merge-checks.log").exists()
+    assert "feature.txt" in (sdir / "post-merge-checks.log").read_text()
+    reaped = json.loads((sdir / "reaped.json").read_text())
+    assert reaped["integrated"] is False
+
+
+def test_post_merge_checks_pass_lands_on_base(git_repo, git):
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    _worktree_with_commit(paths, git, broken=False)  # clean tree, no BROKEN
+    sdir = make_session(paths, "task-001", "COMPLETE", commit="x")
+    cfg = Config(integration="auto-merge", checks=["test ! -f BROKEN"])
+
+    assert reap_session(sdir, cfg, paths) is True
+    # combined base passes the post-merge run: merge stands, task done, no forensic log
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"
+    assert "feature work" in git(git_repo, "log", "--oneline", "main").stdout
+    assert not (sdir / "post-merge-checks.log").exists()
+    assert json.loads((sdir / "reaped.json").read_text())["integrated"] is True
+
+
+def test_verify_after_merge_false_skips_post_merge(git_repo, git):
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    sdir = _skew_setup(paths, git)  # combined tree WOULD fail _SKEW_CHECK...
+    cfg = Config(integration="auto-merge", checks=[_SKEW_CHECK], verify_after_merge=False)
+
+    assert reap_session(sdir, cfg, paths) is True
+    # ...but the post-merge gate is off, so the merge stands: task done, base advanced
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"
+    assert "merge task-001" in git(git_repo, "log", "--oneline", "main").stdout
+    assert not (sdir / "post-merge-checks.log").exists()
 
 
 # ---- follow-up filing -------------------------------------------------------
@@ -531,9 +607,10 @@ def test_second_run_refused_while_run_lock_held(git_repo):
     assert list(paths.sessions_dir.iterdir()) == []
 
 
-def test_run_lock_released_after_run_returns(git_repo):
+def test_run_lock_released_after_run_returns(git_repo, stub_bin):
     """The lock is advisory and released when the run ends, so a later run can
     re-acquire it (flock auto-release is the crash semantic we rely on)."""
+    stub_bin()  # claude on PATH so the run's critical preflight passes
     paths = setup(git_repo)
     loop_mod.run(paths, Config(integration="branch"), sleep_seconds=0)  # no tasks -> returns
     with loop_mod.run_lock(paths.run_lock):  # would raise if still held
@@ -582,9 +659,10 @@ def test_reap_alongside_run_leaves_live_session_process_and_worktree(git_repo):
         proc.wait()
 
 
-def test_fresh_run_reconciles_orphaned_in_progress_after_crash(git_repo):
+def test_fresh_run_reconciles_orphaned_in_progress_after_crash(git_repo, stub_bin):
     """After a run is killed (lock auto-released), a fresh run takes the lock and
     reconciles orphaned in-progress sessions to blocked — crash recovery works."""
+    stub_bin()  # claude on PATH so the run's critical preflight passes
     paths = setup(git_repo)
     add_task(paths, "task-001", status="in-progress")
     sdir = paths.sessions_dir / "sess-orphan"
@@ -1152,9 +1230,10 @@ def test_one_dead_group_does_not_abort_harvest_of_others(git_repo):
     assert read_task(paths.tasks_dir / "task-002.md").status == "done"
 
 
-def test_run_settles_with_parked_timeout_task(git_repo):
+def test_run_settles_with_parked_timeout_task(git_repo, stub_bin):
     """A terminal `timeout` task (retries exhausted) lets the loop settle cleanly, not
     spin to max_iterations."""
+    stub_bin()  # claude on PATH so the run's critical preflight passes
     paths = setup(git_repo)
     add_task(paths, "task-001", status="timeout")
     loop_mod.run(paths, Config(integration="branch"), sleep_seconds=0)  # must return
@@ -1206,8 +1285,9 @@ def test_collect_status_tolerates_non_dict_result(git_repo):
     assert any(s["session"] == "sess-x" for s in report["sessions"])
 
 
-def test_run_survives_poisoned_sentinel(git_repo):
+def test_run_survives_poisoned_sentinel(git_repo, stub_bin):
     """A non-dict result.json must not crash run() at startup (reconcile -> reap_all)."""
+    stub_bin()  # claude on PATH so the run's critical preflight passes
     paths = setup(git_repo)
     sdir = paths.sessions_dir / "sess-poison"
     sdir.mkdir(parents=True)
@@ -1226,7 +1306,8 @@ def test_pr_mode_push_failure_keeps_done_with_clear_message(git_repo, monkeypatc
     make_worktree(paths, "sess-task-001", "task-001", "main")
     monkeypatch.setattr(loop_mod, "which", lambda name: "/usr/bin/gh")   # pretend gh present
     # git_repo has no 'origin' remote -> push fails before gh is even invoked
-    success, detail = loop_mod.integrate("task-001", Config(integration="pr"), paths)
+    success, detail = loop_mod.integrate("task-001", Config(integration="pr"), paths,
+                                         paths.sessions_dir)
     assert success is True                                   # branch is the deliverable
     assert "push failed" in detail and "no pr" in detail.lower()
 

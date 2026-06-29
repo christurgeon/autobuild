@@ -27,6 +27,8 @@ class Config:
                                       # (git push / gh pr create) during integration
     checks: list[str] = field(default_factory=list)
     verify_checks: bool = True  # re-run checks in the reaper before integrating
+    verify_after_merge: bool = True  # re-run checks on the COMBINED base tree after an
+                                     # auto-merge; revert + block if they fail
     claude_cmd: str = "claude"
     # --- session permission posture ------------------------------------------
     # Default is maximally permissive: full bypass, no sandbox gate, so a session can do
@@ -161,6 +163,7 @@ def load_config(path: Path) -> Config:
                                        defaults.integration_max_retries, minimum=0)
     checks = want_str_list("checks", defaults.checks)
     verify_checks = want_bool("verify_checks", defaults.verify_checks)
+    verify_after_merge = want_bool("verify_after_merge", defaults.verify_after_merge)
 
     permission_mode = want_enum("permission_mode", defaults.permission_mode,
                                 VALID_PERMISSION_MODES)
@@ -187,6 +190,7 @@ def load_config(path: Path) -> Config:
         integration_max_retries=integration_max_retries,
         checks=checks,
         verify_checks=verify_checks,
+        verify_after_merge=verify_after_merge,
         claude_cmd=claude_cmd,
         permission_mode=permission_mode,
         allowed_tools=allowed_tools,

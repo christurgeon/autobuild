@@ -63,6 +63,19 @@ def test_verify_checks_false_parses_to_bool(tmp_path):
     assert cfg.checks == []  # other defaults preserved
 
 
+def test_verify_after_merge_defaults_true_and_parses_to_bool(tmp_path):
+    assert Config().verify_after_merge is True  # opt-out: on by default
+    p = tmp_path / "config.yml"
+    p.write_text("verify_after_merge: false\n")
+    assert load_config(p).verify_after_merge is False
+
+
+def test_verify_after_merge_non_bool_raises(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, "verify_after_merge: yes please\n"))
+    assert any("verify_after_merge" in p for p in e.value.problems)
+
+
 def test_checks_block_list_keeps_inner_quotes(tmp_path):
     p = tmp_path / "config.yml"
     p.write_text(TEMPLATE_CONFIG)
