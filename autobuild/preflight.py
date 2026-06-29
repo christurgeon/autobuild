@@ -98,7 +98,12 @@ def _check_gh(paths: Paths, config: Config) -> CheckResult | None:
     if not which("gh"):
         return (WARN, "gh CLI",
                 "gh not on PATH; PRs can't be opened (branch left for manual PR)")
-    r = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True)
+    try:
+        r = subprocess.run(["gh", "auth", "status"], capture_output=True,
+                           text=True, timeout=10)
+    except subprocess.TimeoutExpired:
+        return (WARN, "gh auth",
+                "gh auth status timed out; PRs can't be verified (branch left for manual PR)")
     if r.returncode == 0:
         return (PASS, "gh auth", "gh is authenticated")
     return (WARN, "gh auth",
