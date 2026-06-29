@@ -144,7 +144,11 @@ This is the part that requires reading multiple files to understand:
    `pr`/`branch` — just blocks that task and lets the run continue. Otherwise, for
    `COMPLETE` it **verifies first**: unless
    `verify_checks: false`, it re-runs `config.checks` against the session's worktree and, if any
-   fail, blocks the task and keeps the branch instead of integrating (trust, but verify). If they
+   fail, blocks the task and keeps the branch instead of integrating (trust, but verify). For
+   `auto-merge` a second gate (`_post_merge_verify`, opt-out `verify_after_merge`) re-runs the
+   checks against the **combined base tree** after the `--no-ff` merge and **hard-resets base back
+   to its pre-merge HEAD** if they fail — catching semantic merge skew two independently-green
+   branches can produce with no textual conflict. If they
    pass it **integrates** (`integrate` → `pr` via `gh` / `auto-merge` / `branch`) and only then
    `set_status`es the task `done` — so a failed auto-merge leaves the task `blocked`, not falsely
    `done`. `BLOCKED`/`NEEDS_HUMAN` set the task `blocked`; a synthetic `TIMEOUT` is never integrated

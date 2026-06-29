@@ -192,10 +192,12 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
 
 
-def integrate(tid: str, config: Config, paths: Paths) -> tuple[bool, str]:
-    """Integrate the task's branch per config. Returns (success, detail). Only an
-    auto-merge conflict counts as failure (work not landed); pr/branch always
-    succeed because the branch itself is the deliverable."""
+def integrate(tid: str, config: Config, paths: Paths, sdir: Path) -> tuple[bool, str]:
+    """Integrate the task's branch per config. Returns (success, detail). Failure means
+    the work did not land: an auto-merge conflict, or (auto-merge only) a clean merge whose
+    COMBINED base tree fails the post-merge checks — that merge is reverted. pr/branch always
+    succeed because the branch itself is the deliverable. `sdir` is the session dir, used for
+    the post-merge forensic log."""
     branch = branch_name(tid)
     base = config.base_branch
     root = paths.root
@@ -226,22 +228,53 @@ def integrate(tid: str, config: Config, paths: Paths) -> tuple[bool, str]:
         return True, f"PR creation failed for {branch}; pushed branch left for manual PR"
 
     if mode == "auto-merge":
+        # Snapshot base's HEAD BEFORE the merge so a failed post-merge verification can
+        # undo it precisely (simpler and more local than re-reading meta.json's base_sha).
+        pre_merge_sha = _git(root, "rev-parse", "HEAD").stdout.strip()
         r = _git(root, "merge", "--no-ff", "-m", f"autobuild: merge {tid}", branch)
-        if r.returncode == 0:
-            return True, f"merged {branch} into {base}"
-        _git(root, "merge", "--abort")  # don't leave the repo mid-merge
-        return False, f"auto-merge conflict for {branch}"
+        if r.returncode != 0:
+            _git(root, "merge", "--abort")  # don't leave the repo mid-merge
+            return False, f"auto-merge conflict for {branch}"
+        return _post_merge_verify(tid, branch, config, paths, sdir, pre_merge_sha)
 
     return False, f"unknown integration mode '{mode}'"
 
 
+def _post_merge_verify(tid: str, branch: str, config: Config, paths: Paths, sdir: Path,
+                       pre_merge_sha: str) -> tuple[bool, str]:
+    """After an auto-merge lands, re-run config.checks against the COMBINED base working
+    tree (paths.root). Two independently-green branches can still merge into a red base with
+    no textual conflict (semantic skew: A renames a helper, B adds a caller of the old name);
+    the pre-merge gate only ever saw each branch alone, so this is the only place that catches
+    it. On the first failing check, `git reset --hard <pre_merge_sha>` removes the merge commit
+    (never leave base red), write a forensic log, and report failure — the reaper then blocks
+    the task and keeps the branch. Skipped (merge stands) when verify_after_merge is off or
+    there are no checks; independent of verify_checks (which gates the pre-merge worktree run)."""
+    base = config.base_branch
+    landed = f"merged {branch} into {base}"
+    if not config.verify_after_merge or not config.checks:
+        return True, landed
+    for cmd in config.checks:
+        r = subprocess.run(cmd, shell=True, cwd=str(paths.root),
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            _write_checks_log(sdir, cmd, r.returncode, r.stdout, r.stderr,
+                              name="post-merge-checks.log")
+            _git(paths.root, "reset", "--hard", pre_merge_sha)  # undo the merge
+            return False, f"post-merge checks failed for {branch}; merge reverted"
+    return True, landed
+
+
 # --- verification gate -------------------------------------------------------
 
-def _write_checks_log(sdir: Path, cmd: str, code: int, stdout: str, stderr: str) -> None:
+def _write_checks_log(sdir: Path, cmd: str, code: int, stdout: str, stderr: str,
+                      name: str = "checks.log") -> None:
     """Persist why verification failed: the command, its exit code, and the tail of
-    its combined output (last 50 lines) so a human can inspect without re-running."""
+    its combined output (last 50 lines) so a human can inspect without re-running.
+    `name` selects the log file — the pre-merge gate writes `checks.log`, the post-merge
+    combined-tree gate writes `post-merge-checks.log`."""
     tail = "\n".join(((stdout or "") + (stderr or "")).splitlines()[-50:])
-    (sdir / "checks.log").write_text(
+    (sdir / name).write_text(
         f"command: {cmd}\nexit: {code}\n\n--- output (tail) ---\n{tail}\n",
         encoding="utf-8",
     )
@@ -460,7 +493,7 @@ def _reap_session_locked(sdir: Path, result: dict, config: Config, paths: Paths)
             # No follow-ups: a tree that fails checks did not meet the contract, so
             # its self-reported follow-ups are part of the same untrusted output.
         else:
-            success, detail = integrate(tid, config, paths)
+            success, detail = integrate(tid, config, paths, sdir)
             if success:
                 if task:
                     set_status(task.path, "done")
