@@ -7,6 +7,7 @@ import importlib.resources as ir
 import sys
 
 from . import loop as loop_mod
+from . import preflight as preflight_mod
 from .config import ConfigError, load_config
 from .loop import log, ok
 from .paths import Paths
@@ -113,6 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("init", help="copy GOAL.md, CLAUDE.md, tasks/, .autobuild/config.yml into this project")
+    sub.add_parser("doctor", help="preflight: check the environment before a run spends tokens")
     sub.add_parser("run", help="schedule -> spawn sessions in worktrees -> reap, until drained")
     sub.add_parser("status", help="print every task's status and any in-flight sessions")
     sub.add_parser("reap", help="one-shot: collect finished sessions, update tasks, integrate")
@@ -141,6 +143,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  - {problem}", file=sys.stderr)
         return 2
 
+    if args.command == "doctor":
+        return preflight_mod.doctor(paths, config)
     if args.command == "run":
         try:
             loop_mod.run(paths, config)
@@ -149,6 +153,9 @@ def main(argv: list[str] | None = None) -> int:
                  f"second run. The lock releases automatically when that run exits.")
             return 1
         except loop_mod.DirtyBaseTree as e:
+            _err(str(e))
+            return 2
+        except preflight_mod.PreflightError as e:
             _err(str(e))
             return 2
         except loop_mod.BaseBranchLeak as e:
