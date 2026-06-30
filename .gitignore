@@ -4,6 +4,8 @@
 .autobuild/.running
 .autobuild/backlog.lock
 .autobuild/run.lock
+.autobuild/run-summary.json
+.autobuild/retries.json
 
 # editor / OS noise
 .DS_Store
