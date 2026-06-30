@@ -1019,6 +1019,8 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float,
     assert_run_preflight(paths, config)
     budget = (f", run_budget={config.run_budget_seconds}s"
               if config.run_budget_seconds > 0 else "")
+    if config.run_budget_usd > 0:
+        budget += f", run_budget=${config.run_budget_usd:.2f}"
     log(f"starting loop (max_parallel={config.max_parallel}, "
         f"max_iterations={config.max_iterations}{budget})")
     reconcile(paths, sweep_in_progress=True)
@@ -1043,6 +1045,33 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float,
     status(paths, config)
 
 
+def _run_spend(paths: Paths, sids: set[str], cache: dict[str, float]) -> float:
+    """Cumulative USD spend across the sessions THIS run spawned (`sids`) — the sum of each
+    session's captured cost (`total_cost_usd` from its stream-json `result` event).
+
+    Scoped to `sids`, NOT every session dir on disk: session dirs persist after reaping
+    (only `clean` removes them), so summing all of them would pre-charge a fresh `run` with
+    a prior run's spend and make a budget-capped backlog un-resumable. Counting only this
+    run's own sessions keeps the budget per-run (consistent with run_budget_seconds) while
+    still totalling a single run's real spend, retries included.
+
+    `cache` memoizes FINISHED sessions, whose cost can never change again, so each pass only
+    re-reads this run's still-running sessions (≤ max_parallel small files). A session with
+    no `result` event yet — running, killed, or crashed — contributes 0; its cost is unknown,
+    never guessed."""
+    total = 0.0
+    for sid in sids:
+        if sid in cache:
+            total += cache[sid]
+            continue
+        prog = read_progress(paths.sessions_dir / sid / "session.out")
+        cost = prog.cost_usd or 0.0
+        if prog.finished:
+            cache[sid] = cost  # frozen: a finished session's cost is immutable
+        total += cost
+    return total
+
+
 def _supervise(paths: Paths, config: Config, running: list[RunningSession], *,
                sleep_seconds: float, monotonic=time.monotonic) -> str:
     """The scheduling loop. Appends spawned sessions to `running` and keeps it in sync
@@ -1050,9 +1079,10 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession], *,
     can still see — and kill — what was running when the halt fired.
 
     Returns the terminal reason the run ended for — `drained` (backlog empty),
-    `settled` (only blocked/unsatisfiable work left), or `max_iterations` (budget
-    spent with work unstarted) — so the caller records it in the run summary instead
-    of re-deriving it. (The `halted` reason is supplied by the BaseBranchLeak handler.)"""
+    `settled` (only blocked/unsatisfiable work left), or one of the budget caps with work
+    left unstarted: `max_iterations`, `run_budget_seconds`, `run_budget_usd` — so the caller
+    records it in the run summary instead of re-deriving it. (The `halted` reason is supplied
+    by the BaseBranchLeak handler.)"""
     iteration = 0
     # Optional whole-run WALL-CLOCK budget: a monotonic deadline computed ONCE here (not per
     # poll tick — same reasoning as max_iterations below: a long fleet of poll ticks must not
@@ -1063,6 +1093,16 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession], *,
     # it (it restarts the budget), which is fine and consistent.
     budget_deadline = (monotonic() + config.run_budget_seconds
                        if config.run_budget_seconds > 0 else None)
+    # Optional whole-run COST budget (issue #41): the financial complement to the wall-clock
+    # one. Cost is only known once a session finishes (its stream-json `result` event), so it
+    # can't preempt a running session mid-flight — instead, like the others, it folds into
+    # `over_budget` to stop CLAIMING new work and drain. `run_sids` is the set of sessions
+    # THIS run spawned (so the budget is per-run, not pre-charged by persisted prior-run
+    # session dirs); `cost_cache` freezes finished-session costs so each pass only re-reads
+    # the in-flight ones.
+    budget_usd = config.run_budget_usd if config.run_budget_usd > 0 else None
+    run_sids: set[str] = set()
+    cost_cache: dict[str, float] = {}
     while True:
         running[:] = _harvest(running, config, paths)
 
@@ -1077,12 +1117,20 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession], *,
         over_iterations = iteration >= config.max_iterations
         # The wall-clock budget is, by contrast, deliberately elapsed-time based.
         over_time = budget_deadline is not None and monotonic() >= budget_deadline
-        over_budget = over_iterations or over_time
+        # The cost budget is real-spend based: sum this run's session costs (computed once
+        # per pass and reused below, only when a budget is set so the disabled case does no
+        # I/O). `>=` so the cap is a ceiling. In-flight sessions read 0 until they finish, so
+        # actual spend can overshoot by up to ~max_parallel * a session's cost (soft budget,
+        # same posture as run_budget_seconds).
+        spent_usd = _run_spend(paths, run_sids, cost_cache) if budget_usd is not None else 0.0
+        over_cost = budget_usd is not None and spent_usd >= budget_usd
+        over_budget = over_iterations or over_time or over_cost
         claimed = claim_tasks(free, paths) if (free > 0 and not over_budget) else []
         if claimed:
             iteration += 1
         for t in claimed:
             rs = spawn_session(t, config, paths)
+            run_sids.add(rs.sid)  # count this session against the run's cost budget
             log(f"spawn {rs.sid} -> {rs.tid}")
             running.append(rs)
 
@@ -1105,13 +1153,19 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession], *,
                 # Budget spent with work still left: report the cap accurately instead of
                 # claiming a clean drain. In-flight sessions were drained above, so the only
                 # thing unfinished is work we declined to start. Name WHICH cap tripped so a
-                # human knows what to raise — the wall-clock budget takes precedence (it's the
-                # hard real-time wall; raise run_budget_seconds), else the iteration cap — and
-                # return that reason so the run summary records which cap ended the run.
+                # human knows what to raise — the wall-clock budget takes precedence (the hard
+                # real-time wall; raise run_budget_seconds), then the cost ceiling (raise
+                # run_budget_usd), then the iteration cap — and return that reason so the run
+                # summary records which cap ended the run.
                 if over_time:
                     warn(f"hit run_budget_seconds ({config.run_budget_seconds}s); stopping "
                          f"with {len(pending)} unfinished task(s) — see 'autobuild status'")
                     return "run_budget_seconds"
+                if over_cost:
+                    warn(f"hit run_budget_usd (${config.run_budget_usd:.2f}, spent "
+                         f"${spent_usd:.2f}); stopping with {len(pending)} unfinished "
+                         f"task(s) — see 'autobuild status'")
+                    return "run_budget_usd"
                 warn(f"hit max_iterations ({config.max_iterations}); stopping with "
                      f"{len(pending)} unfinished task(s) — see 'autobuild status'")
                 return "max_iterations"
@@ -1295,6 +1349,9 @@ def _session_outcomes(paths: Paths) -> dict[str, dict]:
             continue
         if duration is not None:
             outcome["duration_seconds"] = duration
+        # The session's cost (issue #41): the total_cost_usd from its stream-json result
+        # event, or None if it never emitted one (killed/crashed before finishing).
+        outcome["cost_usd"] = read_progress(sdir / "session.out").cost_usd
         outcomes[tid] = outcome
     return outcomes
 
@@ -1316,12 +1373,18 @@ def write_run_summary(paths: Paths, config: Config, reason: str) -> dict:
             "attempts": retry_count(paths.retries_ledger, t.id),
             "integration": out,
             "followups": list(out["followups"]) if out else [],
+            # this task's latest session cost (issue #41); None if unknown/not finished
+            "cost_usd": out.get("cost_usd") if out else None,
         }
         rows.append(row)
+    # Project total = sum of the per-task row costs, so total == sum(rows) by construction
+    # (no disagreement between the headline figure and the rows that compose it).
+    total_cost = sum(r["cost_usd"] for r in rows if r["cost_usd"])
     summary = {
         "generated_at": _now(),
         "reason": reason,
         "counts": report["counts"],
+        "total_cost_usd": total_cost,
         "tasks": rows,
         "stuck": report["stuck"],
     }

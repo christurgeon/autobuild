@@ -14,6 +14,14 @@ run_budget_seconds: 0         # whole-run wall-clock ceiling (int >= 0; 0 = unli
                               # Once spent, the loop stops claiming new tasks, drains
                               # what's in flight, and reports the cap. Monotonic +
                               # in-memory, so a killed/resumed run restarts the budget.
+run_budget_usd: 0             # whole-run COST ceiling in USD (number >= 0; 0 = unlimited).
+                              # The financial complement to run_budget_seconds: summed from
+                              # each session's actual cost (its stream-json total_cost_usd),
+                              # it stops claiming new work, drains in-flight, and reports.
+                              # A SOFT cap — in-flight sessions finish, so real spend can
+                              # overshoot by up to ~max_parallel x a session's cost. Scoped
+                              # to this run's own sessions, so re-running a budget-capped
+                              # backlog starts fresh (not pre-charged by prior runs).
 
 integration: pr               # pr | auto-merge | branch
                               #   pr        -> open a PR per finished task (default)

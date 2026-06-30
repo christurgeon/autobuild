@@ -14,6 +14,15 @@ max_iterations: 100           # integer >= 1: global safety stop for the outer l
 # Independent of per-session task_timeout_seconds below.
 run_budget_seconds: 0         # integer >= 0: wall-clock budget for the whole run (0 = off)
 
+# Whole-run COST ceiling: the cumulative USD cost across the sessions THIS run spawns. Once
+# spent, autobuild stops claiming new tasks, lets in-flight sessions drain, and reports the
+# cap (the financial complement to run_budget_seconds). Summed from each session's actual
+# cost (its `total_cost_usd`), so a session killed/crashed before finishing counts as 0.
+# It's a SOFT cap: in-flight sessions finish, so real spend can overshoot the ceiling by up
+# to ~max_parallel x a session's cost. Scoped to this run's own sessions, so re-running to
+# finish a budget-capped backlog starts fresh (it is NOT pre-charged by prior runs' costs).
+run_budget_usd: 0             # number >= 0: USD cost budget for the whole run (0 = off)
+
 # What happens to a task's branch when its session reports COMPLETE:
 #   pr         -> open a pull request for human review (default, safest)
 #   auto-merge -> if checks pass, merge the branch into base_branch

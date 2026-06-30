@@ -6,6 +6,7 @@ instead of surfacing later inside the loop."""
 
 from __future__ import annotations
 
+import math
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,6 +27,13 @@ class Config:
                                  # Once spent the loop stops claiming new work, drains what's
                                  # in flight, and reports the cap. Monotonic + in-memory, so a
                                  # killed/resumed run does not resume the clock.
+    run_budget_usd: float = 0.0  # float >= 0; cumulative USD cost ceiling across all the
+                                 # sessions THIS run spawns (0 = unlimited). Summed from each
+                                 # session's stream-json result event (total_cost_usd). Once
+                                 # spent the loop stops claiming new work, drains in-flight,
+                                 # and reports — the same drain path as run_budget_seconds.
+                                 # Scoped to this run's own sessions, so re-running to finish
+                                 # a budget-capped backlog starts fresh (not pre-charged).
     integration: str = "pr"  # pr | auto-merge | branch
     integration_max_retries: int = 2  # int >= 0; extra attempts for transient remote ops
                                       # (git push / gh pr create) during integration
@@ -111,6 +119,27 @@ def load_config(path: Path) -> Config:
             return default
         return v
 
+    def want_float(key: str, default: float, *, minimum: float = 0.0) -> float:
+        # Like want_int but accepts a float (or an int, widened to float). bool is an int
+        # subclass, so reject it explicitly — same guard as want_int. Unlike want_int we must
+        # also reject non-finite values: YAML resolves `.nan`/`.inf` to floats, and `nan`
+        # passes any `< minimum` check (every comparison with nan is False) — so a configured
+        # `run_budget_usd: .nan` would SILENTLY DISABLE the cap (nan > 0 is False). Reject
+        # non-finite explicitly so an unusable budget fails loudly instead.
+        if key not in data:
+            return default
+        v = data[key]
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            problems.append(f"{key} must be a number >= {minimum} (got {v!r})")
+            return default
+        if not math.isfinite(v):
+            problems.append(f"{key} must be a finite number >= {minimum} (got {v!r})")
+            return default
+        if v < minimum:
+            problems.append(f"{key} must be >= {minimum} (got {v})")
+            return default
+        return float(v)
+
     def want_str(key: str, default: str) -> str:
         if key not in data:
             return default
@@ -177,6 +206,7 @@ def load_config(path: Path) -> Config:
     max_iterations = want_int("max_iterations", defaults.max_iterations)
     run_budget_seconds = want_int("run_budget_seconds", defaults.run_budget_seconds,
                                   minimum=0)
+    run_budget_usd = want_float("run_budget_usd", defaults.run_budget_usd, minimum=0.0)
 
     integration = want_enum("integration", defaults.integration, VALID_INTEGRATIONS)
     integration_max_retries = want_int("integration_max_retries",
@@ -208,6 +238,7 @@ def load_config(path: Path) -> Config:
         base_branch=base_branch,
         max_iterations=max_iterations,
         run_budget_seconds=run_budget_seconds,
+        run_budget_usd=run_budget_usd,
         integration=integration,
         integration_max_retries=integration_max_retries,
         checks=checks,

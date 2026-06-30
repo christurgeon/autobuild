@@ -67,6 +67,22 @@ def test_run_summary_written_on_clean_drain(git_repo, stub_bin, monkeypatch):
         assert row["integration"]["result"] == "COMPLETE"
 
 
+def test_run_summary_records_cost(git_repo, stub_bin, monkeypatch):
+    """Issue #41: the summary records each task's session cost and a project total
+    (the sum of the per-task rows, so total == sum(rows) by construction)."""
+    stub_bin(STUB_COST="0.30")
+    paths = init_project(git_repo, monkeypatch, integration="branch")
+    write_task(paths, "task-001")
+    write_task(paths, "task-002")
+
+    loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=5)
+
+    summary = _summary(paths)
+    for tid in ("task-001", "task-002"):
+        assert abs(_row(summary, tid)["cost_usd"] - 0.30) < 1e-9
+    assert abs(summary["total_cost_usd"] - 0.60) < 1e-9
+
+
 def test_run_summary_lists_blocked_task_with_reason(git_repo, stub_bin, monkeypatch):
     # task-002 BLOCKED -> task-003 can never run (stuck behind a blocked dep).
     stub_bin(STUB_STATUS_task_002="BLOCKED")
