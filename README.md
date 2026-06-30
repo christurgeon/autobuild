@@ -103,6 +103,10 @@ with autobuild.
 ```bash
 uv sync          # create the venv (Python 3.11+) and install deps
 uv run pytest    # full suite — unit tests + a token-free e2e loop against a stub `claude`
+
+# Opt-in: drive ONE real `claude -p` task end-to-end (spends tokens, needs a login).
+# Never run by pytest/CI — run it by hand after changing the session contract or spawn:
+uv run python tools/live_smoke.py
 ```
 
 ## License
