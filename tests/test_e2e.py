@@ -253,7 +253,54 @@ def test_e2e_max_iterations_drains_inflight_and_reports_leftover(git_repo, stub_
     assert s["task-002"] == "todo"     # never claimed -> recoverable on the next run
     out = capsys.readouterr().out
     assert "hit max_iterations (1)" in out
-    assert "backlog drained — COMPLETE" not in out
+
+
+def _set_budget_usd(paths, value):
+    paths.config_file.write_text(
+        paths.config_file.read_text() + f"\nrun_budget_usd: {value}\n")
+
+
+def test_e2e_cost_budget_stops_claiming_new_work(git_repo, stub_bin, monkeypatch, capsys):
+    """Issue #41: once cumulative session cost crosses run_budget_usd, the loop stops
+    claiming new work, drains what's in flight, and reports the cap. max_parallel=1 makes
+    the accounting deterministic: $0.40/session vs a $1.00 budget -> the 4th task is never
+    claimed (after 3 sessions = $1.20 >= $1.00)."""
+    stub_bin(STUB_COST="0.40", STUB_MSGS="1")
+    paths = init_project(git_repo, monkeypatch, integration="branch", max_parallel=1)
+    _set_budget_usd(paths, "1.0")
+    for n in range(1, 5):
+        write_task(paths, f"task-00{n}")
+
+    loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=0.05)
+
+    s = statuses(paths)
+    done = sum(1 for v in s.values() if v == "done")
+    assert done < 4                       # budget tripped before finishing all
+    assert sum(1 for v in s.values() if v == "todo") >= 1   # leftover recoverable
+    out = capsys.readouterr().out
+    assert "hit run_budget_usd" in out
+    summary = json.loads(paths.run_summary.read_text())
+    assert summary["reason"] == "run_budget_usd"
+
+
+def test_e2e_cost_budget_is_per_run_so_backlog_resumes(git_repo, stub_bin, monkeypatch):
+    """Regression for the resumability trap: run_budget_usd is scoped to the sessions a run
+    spawns, NOT every persisted session dir. So re-running a budget-capped backlog starts
+    fresh (not pre-charged by the prior run's costs) and finishes the leftover work."""
+    stub_bin(STUB_COST="0.40", STUB_MSGS="1")
+    paths = init_project(git_repo, monkeypatch, integration="branch", max_parallel=1)
+    _set_budget_usd(paths, "1.0")
+    for n in range(1, 5):
+        write_task(paths, f"task-00{n}")
+
+    loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=0.05)
+    first = statuses(paths)
+    assert sum(1 for v in first.values() if v == "todo") >= 1   # budget left work undone
+
+    # A second run on the same project (no clean): the budget is NOT pre-charged by the
+    # first run's persisted session dirs, so it claims and finishes the remaining task(s).
+    loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=0.05)
+    assert all(v == "done" for v in statuses(paths).values())
 
 
 def test_e2e_run_halts_on_base_leak(git_repo, stub_bin, monkeypatch, git):

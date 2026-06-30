@@ -1019,6 +1019,8 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float,
     assert_run_preflight(paths, config)
     budget = (f", run_budget={config.run_budget_seconds}s"
               if config.run_budget_seconds > 0 else "")
+    if config.run_budget_usd > 0:
+        budget += f", run_budget=${config.run_budget_usd:.2f}"
     log(f"starting loop (max_parallel={config.max_parallel}, "
         f"max_iterations={config.max_iterations}{budget})")
     reconcile(paths, sweep_in_progress=True)
@@ -1090,6 +1092,16 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession], *,
     # it (it restarts the budget), which is fine and consistent.
     budget_deadline = (monotonic() + config.run_budget_seconds
                        if config.run_budget_seconds > 0 else None)
+    # Optional whole-run COST budget (issue #41): the financial complement to the wall-clock
+    # one. Cost is only known once a session finishes (its stream-json `result` event), so it
+    # can't preempt a running session mid-flight — instead, like the others, it folds into
+    # `over_budget` to stop CLAIMING new work and drain. `run_sids` is the set of sessions
+    # THIS run spawned (so the budget is per-run, not pre-charged by persisted prior-run
+    # session dirs); `cost_cache` freezes finished-session costs so each pass only re-reads
+    # the in-flight ones.
+    budget_usd = config.run_budget_usd if config.run_budget_usd > 0 else None
+    run_sids: set[str] = set()
+    cost_cache: dict[str, float] = {}
     while True:
         running[:] = _harvest(running, config, paths)
 
@@ -1104,12 +1116,20 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession], *,
         over_iterations = iteration >= config.max_iterations
         # The wall-clock budget is, by contrast, deliberately elapsed-time based.
         over_time = budget_deadline is not None and monotonic() >= budget_deadline
-        over_budget = over_iterations or over_time
+        # The cost budget is real-spend based: sum this run's session costs (computed once
+        # per pass and reused below, only when a budget is set so the disabled case does no
+        # I/O). `>=` so the cap is a ceiling. In-flight sessions read 0 until they finish, so
+        # actual spend can overshoot by up to ~max_parallel * a session's cost (soft budget,
+        # same posture as run_budget_seconds).
+        spent_usd = _run_spend(paths, run_sids, cost_cache) if budget_usd is not None else 0.0
+        over_cost = budget_usd is not None and spent_usd >= budget_usd
+        over_budget = over_iterations or over_time or over_cost
         claimed = claim_tasks(free, paths) if (free > 0 and not over_budget) else []
         if claimed:
             iteration += 1
         for t in claimed:
             rs = spawn_session(t, config, paths)
+            run_sids.add(rs.sid)  # count this session against the run's cost budget
             log(f"spawn {rs.sid} -> {rs.tid}")
             running.append(rs)
 
@@ -1132,13 +1152,19 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession], *,
                 # Budget spent with work still left: report the cap accurately instead of
                 # claiming a clean drain. In-flight sessions were drained above, so the only
                 # thing unfinished is work we declined to start. Name WHICH cap tripped so a
-                # human knows what to raise — the wall-clock budget takes precedence (it's the
-                # hard real-time wall; raise run_budget_seconds), else the iteration cap — and
-                # return that reason so the run summary records which cap ended the run.
+                # human knows what to raise — the wall-clock budget takes precedence (the hard
+                # real-time wall; raise run_budget_seconds), then the cost ceiling (raise
+                # run_budget_usd), then the iteration cap — and return that reason so the run
+                # summary records which cap ended the run.
                 if over_time:
                     warn(f"hit run_budget_seconds ({config.run_budget_seconds}s); stopping "
                          f"with {len(pending)} unfinished task(s) — see 'autobuild status'")
                     return "run_budget_seconds"
+                if over_cost:
+                    warn(f"hit run_budget_usd (${config.run_budget_usd:.2f}, spent "
+                         f"${spent_usd:.2f}); stopping with {len(pending)} unfinished "
+                         f"task(s) — see 'autobuild status'")
+                    return "run_budget_usd"
                 warn(f"hit max_iterations ({config.max_iterations}); stopping with "
                      f"{len(pending)} unfinished task(s) — see 'autobuild status'")
                 return "max_iterations"
