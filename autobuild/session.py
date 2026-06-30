@@ -14,7 +14,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from subprocess import Popen
+from subprocess import DEVNULL, Popen
 
 from .config import Config
 from .paths import Paths
@@ -350,8 +350,19 @@ def spawn_session(task: Task, config: Config, paths: Paths) -> RunningSession:
     err = open(sdir / "session.err", "w")
     try:
         proc = Popen(
-            [config.claude_cmd, "-p", prompt, "--model", config.model, *flags],
-            cwd=str(wt), stdout=out, stderr=err, start_new_session=True,
+            [config.claude_cmd, "-p", prompt, "--model", config.model,
+             # stream-json flushes one JSON event per line to the redirected session.out as
+             # the agent works, so a long run is observable live (issue #40 — the default
+             # text format buffers session.out to 0 bytes for the whole run); its terminal
+             # `result` event also carries total_cost_usd, which the cost budget sums (issue
+             # #41). --verbose is required by the CLI for `-p --output-format stream-json`.
+             # Output format only: orthogonal to the permission posture in *flags and to the
+             # result.json sentinel protocol (the agent still writes that file itself).
+             "--output-format", "stream-json", "--verbose", *flags],
+            # The session is non-interactive: without a stdin redirect the CLI waits ~3s for
+            # stdin ("no stdin data received in 3s") before every session starts. DEVNULL
+            # removes that per-session stall; the agent reads nothing from stdin anyway.
+            cwd=str(wt), stdout=out, stderr=err, stdin=DEVNULL, start_new_session=True,
             env=_session_env(),
         )
     except FileNotFoundError:

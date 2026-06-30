@@ -67,6 +67,7 @@ lock — is the standard library.
 | `scheduler.py` | dependency gating, priority ordering, atomic claim under an `flock` |
 | `worktree.py` | a git worktree + branch per session, with each task's `done` dependency branches layered onto its base |
 | `session.py` | spawn one fresh `claude -p` via `subprocess.Popen` |
+| `progress.py` | parse a session's stream-json `session.out` into `{messages, cost_usd, finished}` |
 | `loop.py` | the outer loop, the reaper, crash-recovery reconcile, status, clean |
 | `paths.py` | the one place every `.autobuild/` location is defined |
 
@@ -76,6 +77,13 @@ colliding. There is no in-context state: kill `run` and re-run it — a startup
 *reconcile* pass recovers orphaned work from files + git, so every iteration stays
 disposable. `config.yml` is validated at load (a bad value fails fast with exit 2),
 and `autobuild status` flags any tasks stuck behind unsatisfiable dependencies.
+
+Each session is spawned with `--output-format stream-json --verbose`, so its
+`.autobuild/sessions/<id>/session.out` is newline-delimited JSON that flushes live as
+the agent works (the default text format buffered it to 0 bytes for the whole run).
+`autobuild status` parses it (`progress.py`) to show per-session progress — assistant
+messages, idle time (the file's mtime), and, once the terminal `result` event lands, the
+session's cost.
 
 ## Lineage
 
