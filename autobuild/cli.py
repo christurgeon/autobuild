@@ -152,6 +152,9 @@ def main(argv: list[str] | None = None) -> int:
             _err(f"another 'autobuild run' is active (holds {e}); refusing to start a "
                  f"second run. The lock releases automatically when that run exits.")
             return 1
+        except loop_mod.NestedRunRefused as e:
+            _err(str(e))
+            return 1
         except loop_mod.DirtyBaseTree as e:
             _err(str(e))
             return 2
