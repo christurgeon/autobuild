@@ -332,6 +332,65 @@ def test_integrate_pr_zero_retries_is_single_attempt(git_repo, monkeypatch):
     assert slept == []
 
 
+@pytest.mark.parametrize("stderr,permanent", [
+    ("HTTP 401: Bad credentials", True),
+    ("gh: To get started with GitHub CLI, please run: gh auth login", True),
+    ("HTTP 403: Resource not accessible by integration", True),
+    ("GraphQL: Could not resolve to a Repository with the name 'o/r' (createPullRequest)", True),
+    ("error: Permission denied", True),
+    ("HTTP 403: API rate limit exceeded", False),       # rate limit carve-out
+    ("You have exceeded a secondary rate limit", False),
+    ("HTTP 403: You have triggered an abuse detection mechanism", False),  # abuse carve-out
+    ("error: server returned HTTP 502", False),          # transient 5xx
+    ("error: connection timed out", False),
+    ("", False),
+])
+def test_pr_create_is_permanent(stderr, permanent):
+    assert loop_mod._pr_create_is_permanent(stderr) is permanent
+
+
+def test_integrate_pr_create_permanent_failure_is_single_shot(git_repo, monkeypatch):
+    """A genuine auth failure on `gh pr create` is not retried: it short-circuits to the
+    same fallback as exhaustion but single-shot, with no backoff sleeps (mirrors push)."""
+    paths = setup(git_repo)
+    gh_calls = {"create": 0, "list": 0}
+
+    def gh_fn(root, *args):
+        if args[:2] == ("pr", "create"):
+            gh_calls["create"] += 1
+            return _cp(1, stderr="HTTP 401: Bad credentials")
+        if args[:2] == ("pr", "list"):
+            gh_calls["list"] += 1
+            return _cp(1, stderr="HTTP 401: Bad credentials")  # auth broken here too
+        return _cp(0)
+
+    success, detail, slept = _pr_integrate(
+        monkeypatch, paths, git_fn=lambda root, *a: _cp(0), gh_fn=gh_fn)
+    assert success
+    assert detail == "PR creation failed for autobuild/task-001; pushed branch left for manual PR"
+    assert gh_calls["create"] == 1   # permanent -> single attempt, no retries
+    assert slept == []
+
+
+def test_integrate_pr_create_rate_limit_is_retried(git_repo, monkeypatch):
+    """A 403 rate-limit clears on its own, so it must stay retryable despite the 403."""
+    paths = setup(git_repo)
+    gh_calls = {"create": 0}
+
+    def gh_fn(root, *args):
+        if args[:2] == ("pr", "create"):
+            gh_calls["create"] += 1
+            return _cp(1, stderr="HTTP 403: API rate limit exceeded")
+        if args[:2] == ("pr", "list"):
+            return _cp(0, stdout="[]")
+        return _cp(0)
+
+    success, detail, slept = _pr_integrate(
+        monkeypatch, paths, git_fn=lambda root, *a: _cp(0), gh_fn=gh_fn)
+    assert gh_calls["create"] == 3   # 1 + 2 retries: not short-circuited
+    assert slept == [1, 2]
+
+
 def test_integrate_auto_merge_conflict_is_not_retried(git_repo, monkeypatch, diverging_dep):
     # The auto-merge conflict path stays single-shot: no sleep, one merge attempt.
     paths = setup(git_repo)
@@ -689,6 +748,20 @@ def test_second_run_refused_while_run_lock_held(git_repo):
     add_task(paths, "task-001", status="todo")
     with loop_mod.run_lock(paths.run_lock):  # simulate the active run holding it
         with pytest.raises(loop_mod.RunLockHeld):
+            loop_mod.run(paths, Config(integration="branch"), sleep_seconds=0)
+    assert read_task(paths.tasks_dir / "task-001.md").status == "todo"
+    assert list(paths.sessions_dir.iterdir()) == []
+
+
+def test_run_refused_when_nested(git_repo, monkeypatch):
+    """`run` invoked inside a spawned session (AUTOBUILD_IN_SESSION=1) refuses with
+    NestedRunRefused BEFORE taking the run lock — proven by holding the lock externally
+    and still getting NestedRunRefused (not RunLockHeld). No task/session state changes."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="todo")
+    monkeypatch.setenv("AUTOBUILD_IN_SESSION", "1")
+    with loop_mod.run_lock(paths.run_lock):  # lock held: a post-lock guard would raise RunLockHeld
+        with pytest.raises(loop_mod.NestedRunRefused):
             loop_mod.run(paths, Config(integration="branch"), sleep_seconds=0)
     assert read_task(paths.tasks_dir / "task-001.md").status == "todo"
     assert list(paths.sessions_dir.iterdir()) == []

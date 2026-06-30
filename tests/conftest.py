@@ -27,6 +27,9 @@ def hermetic_env(tmp_path, monkeypatch):
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.delenv("AUTOBUILD_ALLOW_DIRTY_BASE", raising=False)
+    # So running the suite from *inside* an autobuild session (dogfooding) doesn't trip
+    # loop._assert_not_nested() in every test that drives loop.run directly.
+    monkeypatch.delenv("AUTOBUILD_IN_SESSION", raising=False)
 
 
 def run_git(repo, *args, check=True):

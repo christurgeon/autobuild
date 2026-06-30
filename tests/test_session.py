@@ -288,6 +288,28 @@ def test_spawn_scrubs_credentials_from_child_env(git_repo, monkeypatch, stub_pgi
     assert "PATH" in captured["env"]                # the child still gets a full env
 
 
+def test_session_env_marks_in_session(monkeypatch):
+    """Every spawned child carries AUTOBUILD_IN_SESSION=1 so a nested `autobuild run`
+    can refuse to recurse (loop._assert_not_nested)."""
+    monkeypatch.delenv("AUTOBUILD_IN_SESSION", raising=False)
+    env = session_mod._session_env()
+    assert env["AUTOBUILD_IN_SESSION"] == "1"
+    # ...and the supervisor's own process env is never mutated (fresh dict only).
+    assert "AUTOBUILD_IN_SESSION" not in os.environ
+
+
+def test_spawn_marks_child_in_session(git_repo, monkeypatch, stub_pgid):
+    """The marker reaches the actual Popen env, not just the unit seam."""
+    paths = make_project(git_repo)
+    task = write_task(paths)
+    captured = {}
+    monkeypatch.setattr(session_mod, "Popen",
+                        lambda argv, **kw: (captured.update(kw),
+                                            type("P", (), {"poll": lambda s: None})())[1])
+    spawn_session(task, Config(), paths)
+    assert captured["env"]["AUTOBUILD_IN_SESSION"] == "1"
+
+
 def test_session_env_drops_git_config_injection(monkeypatch):
     """GIT_CONFIG_COUNT/KEY_*/VALUE_*/PARAMETERS inject arbitrary git config (credential
     helpers, core.sshCommand) into every child git call — deny them. GIT_CONFIG_GLOBAL/

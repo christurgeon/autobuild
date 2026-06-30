@@ -103,7 +103,10 @@ Module responsibilities:
   `--max-turns` either way). `_session_env` also strips git push/transport credentials
   (`GH_TOKEN`/`GITHUB_TOKEN`, `SSH_AUTH_SOCK`, askpass + `GIT_SSH_COMMAND`, inline `GIT_CONFIG_*`
   injection) from the child env as defense-in-depth — the agent keeps its commit identity and
-  `ANTHROPIC_*` auth. It returns an in-memory `RunningSession` carrying the child's `pgid`
+  `ANTHROPIC_*` auth. It also **sets `AUTOBUILD_IN_SESSION=1`** in the child env (on a fresh dict,
+  never mutating `os.environ`) so a nested `autobuild run` invoked from inside a session can refuse
+  to recursively spawn more sessions (see `loop._assert_not_nested`). It returns an in-memory
+  `RunningSession` carrying the child's `pgid`
   (also persisted to `meta.json`) and a **monotonic `deadline`** (`time.monotonic() +
   task_timeout_seconds`); the loop supervises it with `proc.poll()` plus that deadline — together
   replacing the bash `.running` PID file.
@@ -227,6 +230,11 @@ settle check yields back to claiming when `runnable_tasks` is non-empty rather t
   than fighting over the same sessions. `reap` is lock-aware — it only performs the dangerous
   in-progress recovery reconcile sweep (which re-queues orphans as a synthetic `TIMEOUT`) when it
   can take the lock (i.e. no live `run`).
+- **`run` refuses to nest.** A spawned session carries `AUTOBUILD_IN_SESSION=1` (set in
+  `session._session_env`); `run` checks it via `_assert_not_nested` *before* the run lock and raises
+  `NestedRunRefused` (non-zero exit) so a session can't recursively spawn more sessions (fork-bomb /
+  token-burn). It's cheap accident prevention, not a security boundary — `unset AUTOBUILD_IN_SESSION`
+  is the deliberate escape hatch. Tests/dogfooding scrub the var in `conftest.hermetic_env`.
 - **Status writes are surgical and atomic.** `set_status` rewrites only the `status:` line via
   regex + `os.replace`; never round-trip a human task file through `yaml.dump` (it would strip
   comments and reorder keys). Follow-up task files are generated, so those *are* serialized with

@@ -263,10 +263,16 @@ _CREDENTIAL_ENV_DENY_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
 
 
 def _session_env() -> dict[str, str]:
-    """The child's environment: the parent's, minus git push/transport credentials."""
-    return {k: v for k, v in os.environ.items()
-            if k not in _CREDENTIAL_ENV_DENYLIST
-            and not k.startswith(_CREDENTIAL_ENV_DENY_PREFIXES)}
+    """The child's environment: the parent's, minus git push/transport credentials, plus
+    AUTOBUILD_IN_SESSION=1 — a marker the spawned agent (and anything it shells out to)
+    inherits so a nested `autobuild run` can refuse to recursively spawn more sessions
+    (loop._assert_not_nested). Builds a fresh dict; never mutates os.environ, so the
+    long-lived supervisor process itself never carries the marker."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in _CREDENTIAL_ENV_DENYLIST
+           and not k.startswith(_CREDENTIAL_ENV_DENY_PREFIXES)}
+    env["AUTOBUILD_IN_SESSION"] = "1"
+    return env
 
 
 def _done_dependencies(task: Task, paths: Paths) -> list[str]:

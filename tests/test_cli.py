@@ -113,6 +113,17 @@ def test_run_refused_with_nonzero_exit_when_run_lock_held(tmp_path, monkeypatch,
     assert "run.lock" in capsys.readouterr().err
 
 
+def test_run_refused_when_nested_in_session(tmp_path, monkeypatch, capsys):
+    """`autobuild run` inside a spawned session (AUTOBUILD_IN_SESSION=1) exits 1 with a
+    clear message — guarding against a session recursively fork-bombing more sessions."""
+    monkeypatch.chdir(tmp_path)
+    cli.main(["init"])
+    monkeypatch.setenv("AUTOBUILD_IN_SESSION", "1")
+    rc = cli.main(["run"])
+    assert rc == 1
+    assert "AUTOBUILD_IN_SESSION" in capsys.readouterr().err
+
+
 def test_invalid_config_exits_2_without_spawning(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     cli.main(["init"])

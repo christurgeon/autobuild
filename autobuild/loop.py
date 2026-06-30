@@ -196,6 +196,27 @@ class RunLockHeld(RuntimeError):
     `autobuild run` owns this project. str() is the lock file path."""
 
 
+class NestedRunRefused(RuntimeError):
+    """Raised when `autobuild run` is invoked from inside a spawned session (the child
+    env carries AUTOBUILD_IN_SESSION=1, set by session._session_env). A session driving
+    the harness would recursively spawn more sessions — a fork-bomb / token-burn sharp
+    edge — so we refuse. str() is the operator-facing reason."""
+
+
+def _assert_not_nested() -> None:
+    """Refuse to start a run nested inside a spawned session. The marker is set in every
+    child's env, so an agent that shells out to `autobuild run` (directly or via a script)
+    trips this before any lock is taken or session is spawned. This is cheap accident
+    prevention, not a security boundary — an operator who truly intends a nested run can
+    `unset AUTOBUILD_IN_SESSION` first."""
+    if os.environ.get("AUTOBUILD_IN_SESSION") == "1":
+        raise NestedRunRefused(
+            "refusing to run: AUTOBUILD_IN_SESSION=1 means this process is inside an "
+            "autobuild-spawned session, and a session running 'autobuild run' would "
+            "recursively spawn more sessions. If you really mean to, 'unset "
+            "AUTOBUILD_IN_SESSION' first.")
+
+
 @contextlib.contextmanager
 def run_lock(lock_file: Path):
     """Hold the project's exclusive run lock for the duration of the with-block.
@@ -256,6 +277,44 @@ def _push_is_permanent(stderr: str) -> bool:
     return any(m in s for m in _PERMANENT_PUSH_MARKERS)
 
 
+# Markers in a failed `gh pr create` stderr that mean a PERMANENT failure (auth / wrong
+# permissions / missing repo). gh formats HTTP errors as "HTTP 401: Bad credentials" /
+# "HTTP 403: ..." and a missing repo via GraphQL as "Could not resolve to a Repository
+# with the name ...". Retrying these only burns the budget with real backoff sleeps, so a
+# matching failure stays single-shot — mirroring _push_is_permanent for `git push`.
+_PERMANENT_PR_MARKERS = (
+    "authentication failed",
+    "bad credentials",
+    "http 401",
+    "401 unauthorized",
+    "http 403",
+    "403 forbidden",
+    "gh auth login",
+    "must be authenticated",
+    "could not resolve to a repository",
+    "repository not found",
+    "resource not accessible",
+    "permission denied",
+    "access denied",
+)
+
+# Transient 403s that must stay retryable even though they carry a permanent-looking
+# marker: GitHub primary/secondary rate limits ("HTTP 403: API rate limit exceeded",
+# "You have exceeded a secondary rate limit") and abuse detection both surface as 403 but
+# clear on their own. A match here vetoes the permanent classification.
+_TRANSIENT_PR_OVERRIDES = (
+    "rate limit",
+    "abuse detection",
+)
+
+
+def _pr_create_is_permanent(stderr: str) -> bool:
+    s = (stderr or "").lower()
+    if any(m in s for m in _TRANSIENT_PR_OVERRIDES):
+        return False
+    return any(m in s for m in _PERMANENT_PR_MARKERS)
+
+
 def _with_retries(attempt, retries: int, sleep):
     """Call `attempt()` up to `1 + max(0, retries)` times. `attempt` returns
     `(done, value)`: a truthy `done` returns `value` immediately (a success, or a
@@ -313,6 +372,12 @@ def _open_pr(root: Path, tid: str, branch: str, base: str, retries: int, sleep) 
             return True, (True, f"opened PR for {branch}")
         if "already exists" in (r.stderr or "").lower() or _pr_exists(root, branch):
             return True, (True, f"PR already exists for {branch}")
+        # A permanent failure (auth / wrong permissions / missing repo) won't succeed on
+        # retry — short-circuit to the same fallback as exhaustion (branch is pushed, so
+        # a human can open the PR) but single-shot, skipping the backoff sleeps. Checked
+        # AFTER _pr_exists so a transient failure that actually opened the PR still wins.
+        if _pr_create_is_permanent(r.stderr):
+            return True, (True, f"PR creation failed for {branch}; pushed branch left for manual PR")
         # Branch IS pushed (visible on the remote); only the PR-open step failed -> a human
         # can open it from the pushed branch, so the work landed: done. (Today's message.)
         return False, (True, f"PR creation failed for {branch}; pushed branch left for manual PR")
@@ -921,6 +986,7 @@ def run(paths: Paths, config: Config, *, sleep_seconds: float = 2.0,
 
     `monotonic` is the wall-clock source for the optional run budget; injectable so
     tests can jump past the deadline without sleeping (mirrors `sleep_seconds`)."""
+    _assert_not_nested()  # refuse a run nested inside a spawned session, before any lock
     with run_lock(paths.run_lock):
         _run_locked(paths, config, sleep_seconds=sleep_seconds, monotonic=monotonic)
 
