@@ -1079,9 +1079,10 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession], *,
     can still see — and kill — what was running when the halt fired.
 
     Returns the terminal reason the run ended for — `drained` (backlog empty),
-    `settled` (only blocked/unsatisfiable work left), or `max_iterations` (budget
-    spent with work unstarted) — so the caller records it in the run summary instead
-    of re-deriving it. (The `halted` reason is supplied by the BaseBranchLeak handler.)"""
+    `settled` (only blocked/unsatisfiable work left), or one of the budget caps with work
+    left unstarted: `max_iterations`, `run_budget_seconds`, `run_budget_usd` — so the caller
+    records it in the run summary instead of re-deriving it. (The `halted` reason is supplied
+    by the BaseBranchLeak handler.)"""
     iteration = 0
     # Optional whole-run WALL-CLOCK budget: a monotonic deadline computed ONCE here (not per
     # poll tick — same reasoning as max_iterations below: a long fleet of poll ticks must not
