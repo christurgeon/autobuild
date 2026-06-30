@@ -641,6 +641,32 @@ def test_reconcile_orphan_that_escaped_onto_base_is_blocked_not_requeued(git_rep
     assert retry_count(paths.retries_ledger, "task-001") == 0
 
 
+def test_reconcile_orphan_escaped_onto_base_halts_under_auto_merge(git_repo, git):
+    """The most consequential halt path, made explicit: under auto-merge a reconciled
+    orphan that escaped onto base must HALT the run (raise BaseBranchLeak) rather than
+    re-queue onto a corrupted base — the leak check is status-agnostic, so labelling the
+    orphan TIMEOUT does not let the escape through (issue #38)."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    base_sha = git(git_repo, "rev-parse", "HEAD").stdout.strip()
+    (git_repo / "escaped.txt").write_text("oops")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-q", "-m", "escaped onto base")
+    sdir = paths.sessions_dir / "sess-task-001"
+    sdir.mkdir(parents=True)
+    (sdir / "meta.json").write_text(json.dumps(
+        {"task": "task-001", "branch": "autobuild/task-001",
+         "base_branch": "main", "base_sha": base_sha}))
+
+    reconcile(paths, sweep_in_progress=True)
+    with pytest.raises(loop_mod.BaseBranchLeak):
+        reap_all(Config(integration="auto-merge"), paths)
+    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+    assert (sdir / "leak.json").exists()
+    assert not (sdir / "reaped.json").exists()   # un-reaped: re-runs keep flagging
+    assert retry_count(paths.retries_ledger, "task-001") == 0
+
+
 def test_reconcile_spares_in_progress_without_sweep(git_repo):
     """The dangerous in-progress recovery sweep is gated: a reconcile that does
     not own the run lock (sweep_in_progress=False) must leave in-progress alone."""
