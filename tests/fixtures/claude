@@ -15,6 +15,8 @@ Env knobs a test sets before driving the loop:
   STUB_STREAM            "0" -> skip the stream-json stdout transcript (default "1")
   STUB_MSGS              # of assistant events in the transcript        (default 2)
   STUB_COST              total_cost_usd in the terminal result event    (default 0.01)
+  STUB_RESULT_DELAY      secs to delay the result event until AFTER result.json (default 0;
+                         models real claude flushing cost after the sentinel — see #49)
 """
 import json
 import os
@@ -93,20 +95,31 @@ def main():
     # on the normal completion path — past the STUB_STALL early-return and STUB_SLEEP — so a
     # stalled/killed session writes no `result` event and therefore reads as 0 cost, exactly
     # like a real killed `claude`. STUB_STREAM=0 disables it (legacy text-mode behavior).
-    if os.environ.get("STUB_STREAM", "1") == "1":
-        msgs = int(os.environ.get("STUB_MSGS", "2"))
-        cost = float(os.environ.get("STUB_COST", "0.01"))
-        def _emit(obj):
-            sys.stdout.write(json.dumps(obj) + "\n")
-            sys.stdout.flush()
+    stream = os.environ.get("STUB_STREAM", "1") == "1"
+    # STUB_RESULT_DELAY models real claude's ordering: it flushes the cost-bearing `result`
+    # event a moment AFTER result.json (which the harness reaps on). >0 -> emit the result
+    # event AFTER the sentinel + this many seconds; 0 (default) -> synchronously before it.
+    result_delay = float(os.environ.get("STUB_RESULT_DELAY", "0") or "0")
+    msgs = int(os.environ.get("STUB_MSGS", "2"))
+    cost = float(os.environ.get("STUB_COST", "0.01"))
+
+    def _emit(obj):
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
+
+    def _emit_result():
+        _emit({"type": "result", "subtype": "success", "num_turns": msgs,
+               "total_cost_usd": cost,
+               "usage": {"input_tokens": 100, "output_tokens": 20}})
+
+    if stream:
         _emit({"type": "system", "subtype": "init", "model": "claude-stub"})
         for i in range(msgs):
             _emit({"type": "assistant",
                    "message": {"model": "claude-stub",
                                "content": [{"type": "text", "text": f"turn {i}"}]}})
-        _emit({"type": "result", "subtype": "success", "num_turns": msgs,
-               "total_cost_usd": cost,
-               "usage": {"input_tokens": 100, "output_tokens": 20}})
+        if result_delay <= 0:
+            _emit_result()  # today's behavior: result event BEFORE the sentinel
 
     if sdir:
         os.makedirs(sdir, exist_ok=True)
@@ -119,6 +132,13 @@ def main():
         with open(tmp, "w") as fh:
             fh.write(payload)
         os.replace(tmp, os.path.join(sdir, "result.json"))
+
+    if stream and result_delay > 0:
+        # Flush the result event AFTER the sentinel — the harness has already reaped on
+        # result.json, so this models the real flush-after-sentinel race the run-end
+        # cost-settle (#49) must tolerate.
+        _time.sleep(result_delay)
+        _emit_result()
     return 0
 
 

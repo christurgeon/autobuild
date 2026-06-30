@@ -83,6 +83,22 @@ def test_run_summary_records_cost(git_repo, stub_bin, monkeypatch):
     assert abs(summary["total_cost_usd"] - 0.60) < 1e-9
 
 
+def test_run_summary_captures_late_flushed_cost(git_repo, stub_bin, monkeypatch):
+    """Regression for #49: real claude flushes its cost-bearing result event AFTER result.json
+    (the harness reaps on result.json), modelled here by STUB_RESULT_DELAY. The run-end
+    cost-settle must wait for that flush so the summary still records the real cost instead of
+    0. (Default settle grace 5s >> the 0.5s delay, so this is not flaky.)"""
+    stub_bin(STUB_COST="0.30", STUB_RESULT_DELAY="0.5")
+    paths = init_project(git_repo, monkeypatch, integration="branch")
+    write_task(paths, "task-001")
+
+    loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=0.05)
+
+    summary = _summary(paths)
+    assert abs(summary["total_cost_usd"] - 0.30) < 1e-9        # NOT 0 despite the late flush
+    assert abs(_row(summary, "task-001")["cost_usd"] - 0.30) < 1e-9
+
+
 def test_run_summary_lists_blocked_task_with_reason(git_repo, stub_bin, monkeypatch):
     # task-002 BLOCKED -> task-003 can never run (stuck behind a blocked dep).
     stub_bin(STUB_STATUS_task_002="BLOCKED")

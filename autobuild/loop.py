@@ -1026,9 +1026,11 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float,
     reconcile(paths, sweep_in_progress=True)
 
     running: list[RunningSession] = []
+    run_sids: set[str] = set()  # the sessions THIS run spawns (filled by _supervise); used
+    #                             both for the cost budget and to settle their costs (#49)
     try:
-        reason = _supervise(paths, config, running, sleep_seconds=sleep_seconds,
-                            monotonic=monotonic)
+        reason = _supervise(paths, config, running, run_sids,
+                            sleep_seconds=sleep_seconds, monotonic=monotonic)
     except BaseBranchLeak as exc:
         # base is corrupt (a session escaped onto it): stop now and KILL any sessions
         # still running — they'd only burn tokens on a doomed run, and the same leak
@@ -1038,10 +1040,10 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float,
         # so it holds the live set.
         for rs in running:
             _kill_group(rs, config.kill_grace_seconds)
-        _finish_run(paths, config, "halted")
+        _finish_run(paths, config, "halted", run_sids)
         _notify(config, "halt", str(exc))
         raise
-    _finish_run(paths, config, reason)
+    _finish_run(paths, config, reason, run_sids)
     status(paths, config)
 
 
@@ -1072,8 +1074,59 @@ def _run_spend(paths: Paths, sids: set[str], cache: dict[str, float]) -> float:
     return total
 
 
-def _supervise(paths: Paths, config: Config, running: list[RunningSession], *,
-               sleep_seconds: float, monotonic=time.monotonic) -> str:
+# Run-end grace for a finished session's stream-json `result` event (which carries the
+# cost) to flush to session.out AFTER its result.json sentinel — see #49. Bounded; the real
+# flush is sub-second, so this is ample headroom, not a typical wait.
+_COST_SETTLE_SECONDS = 5.0
+
+# Reaped statuses an AGENT writes itself, having run `claude` to completion — so its
+# stream-json `result` event (the cost) flushes normally and is worth waiting for. TIMEOUT
+# is excluded: it is ALWAYS synthetic (the harness killed the session), so it never flushes.
+# A *synthetic* BLOCKED/NEEDS_HUMAN (process died/never started) is indistinguishable from
+# the agent-reported one by status alone, so it can burn the grace once — bounded, and only
+# at a run-end that already failed.
+_FLUSHING_STATUSES = frozenset({"COMPLETE", "BLOCKED", "NEEDS_HUMAN"})
+
+
+def _cost_pending(paths: Paths, run_sids: set[str]) -> list[Path]:
+    """This run's reaped sessions whose cost-bearing stream-json `result` event hasn't landed
+    in session.out yet — exactly what `write_run_summary` would under-report (#49). Limited to
+    `run_sids` (this run only, so a lingering unflushed dir from a prior un-`clean`ed run can't
+    add the grace to every future run-end) and to agent-written terminal statuses (a killed
+    TIMEOUT never flushes). An already-finished session.out is excluded."""
+    pending: list[Path] = []
+    for sid in run_sids:
+        sdir = paths.sessions_dir / sid
+        reaped = _read_json(sdir / "reaped.json")
+        if not reaped or reaped.get("status") not in _FLUSHING_STATUSES:
+            continue
+        if not read_progress(sdir / "session.out").finished:
+            pending.append(sdir)
+    return pending
+
+
+def _settle_session_costs(paths: Paths, run_sids: set[str],
+                          grace_seconds: float = _COST_SETTLE_SECONDS) -> None:
+    """Best-effort: before the run summary is read, give this run's just-finished sessions a
+    brief, bounded grace to flush their cost-bearing `result` event into session.out (#49).
+    Real `claude` flushes it just AFTER result.json — on which the harness reaps — so the
+    final draining session(s) can otherwise be summarized cost-less. Returns the moment
+    nothing is pending, or when the grace elapses; NEVER raises and never hangs (a wedged
+    child must not block run end)."""
+    try:
+        if not _cost_pending(paths, run_sids):
+            return
+        deadline = time.monotonic() + max(0.0, grace_seconds)
+        while time.monotonic() < deadline:
+            time.sleep(0.2)
+            if not _cost_pending(paths, run_sids):
+                return
+    except Exception as exc:  # noqa: BLE001 — cost settling is advisory; never break run end
+        warn(f"cost-settle skipped: {exc}")
+
+
+def _supervise(paths: Paths, config: Config, running: list[RunningSession],
+               run_sids: set[str], *, sleep_seconds: float, monotonic=time.monotonic) -> str:
     """The scheduling loop. Appends spawned sessions to `running` and keeps it in sync
     with the live set IN PLACE (`running[:] = ...`) so a caller catching BaseBranchLeak
     can still see — and kill — what was running when the halt fired.
@@ -1096,12 +1149,12 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession], *,
     # Optional whole-run COST budget (issue #41): the financial complement to the wall-clock
     # one. Cost is only known once a session finishes (its stream-json `result` event), so it
     # can't preempt a running session mid-flight — instead, like the others, it folds into
-    # `over_budget` to stop CLAIMING new work and drain. `run_sids` is the set of sessions
-    # THIS run spawned (so the budget is per-run, not pre-charged by persisted prior-run
-    # session dirs); `cost_cache` freezes finished-session costs so each pass only re-reads
-    # the in-flight ones.
+    # `over_budget` to stop CLAIMING new work and drain. `run_sids` (caller-owned, filled
+    # here as we spawn) is the set of sessions THIS run spawned — so the budget is per-run,
+    # not pre-charged by persisted prior-run session dirs, AND the caller can later settle
+    # their costs for the summary (#49). `cost_cache` freezes finished-session costs so each
+    # pass only re-reads the in-flight ones.
     budget_usd = config.run_budget_usd if config.run_budget_usd > 0 else None
-    run_sids: set[str] = set()
     cost_cache: dict[str, float] = {}
     while True:
         running[:] = _harvest(running, config, paths)
@@ -1433,7 +1486,7 @@ def _run_end_message(summary: dict) -> str:
     return f"run ended ({summary.get('reason', '?')}): {counts_str}"
 
 
-def _finish_run(paths: Paths, config: Config, reason: str) -> None:
+def _finish_run(paths: Paths, config: Config, reason: str, run_sids: set[str]) -> None:
     """Write the run summary, print its digest, and notify the operator of the run end —
     all best-effort. A failure here must never mask the run's real outcome (or a re-raised
     BaseBranchLeak halt), so any error is warned and swallowed rather than propagated.
@@ -1441,6 +1494,10 @@ def _finish_run(paths: Paths, config: Config, reason: str) -> None:
     The `done` notification fires for every non-halted end (drained / settled /
     max_iterations); the `halt` end gets its own `halt` event from the BaseBranchLeak
     handler, so we suppress the `done` event here to avoid a double notification."""
+    # Give this run's just-finished sessions a brief, bounded grace to flush their cost into
+    # session.out before the summary reads it (#49). On the halt path the survivors were
+    # killed (not agent-reaped) so they aren't candidates — it's a near-noop there.
+    _settle_session_costs(paths, run_sids)
     summary = None
     try:
         summary = write_run_summary(paths, config, reason)

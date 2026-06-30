@@ -88,6 +88,60 @@ def _write_out(paths, sid, *, cost=None, finished=True, messages=1):
     return sdir
 
 
+def _write_reaped(paths, sid, status="COMPLETE"):
+    (paths.sessions_dir / sid / "reaped.json").write_text(
+        json.dumps({"reaped_at": "t", "status": status, "integrated": True}))
+
+
+def test_settle_returns_fast_when_all_finished(git_repo):
+    paths = setup(git_repo)
+    _write_out(paths, "sess-a", cost=0.10, finished=True)  # result event already present
+    _write_reaped(paths, "sess-a")
+    t0 = time.monotonic()
+    loop_mod._settle_session_costs(paths, {"sess-a"}, grace_seconds=5.0)
+    assert time.monotonic() - t0 < 1.0  # nothing pending -> no wait
+
+
+def test_settle_is_bounded_when_a_session_never_flushes(git_repo):
+    paths = setup(git_repo)
+    _write_out(paths, "sess-a", cost=None, finished=False)  # no result event ever
+    _write_reaped(paths, "sess-a")
+    t0 = time.monotonic()
+    loop_mod._settle_session_costs(paths, {"sess-a"}, grace_seconds=0.3)
+    assert 0.3 <= time.monotonic() - t0 < 2.0  # waited the grace, gave up — no hang
+
+
+def test_settle_waits_on_agent_blocked_session(git_repo):
+    # an agent-reported BLOCKED session ran to completion and DOES flush a cost-bearing
+    # result event, so it is a candidate (widened beyond COMPLETE).
+    paths = setup(git_repo)
+    _write_out(paths, "sess-a", cost=None, finished=False)
+    _write_reaped(paths, "sess-a", status="BLOCKED")
+    t0 = time.monotonic()
+    loop_mod._settle_session_costs(paths, {"sess-a"}, grace_seconds=0.3)
+    assert 0.3 <= time.monotonic() - t0 < 2.0  # treated as a candidate -> bounded wait
+
+
+def test_settle_ignores_timeout_sessions(git_repo):
+    # TIMEOUT is always synthetic (the harness killed the session) — it never flushes, so
+    # it must NOT be a candidate (would burn the whole grace for nothing).
+    paths = setup(git_repo)
+    _write_out(paths, "sess-a", cost=None, finished=False)
+    _write_reaped(paths, "sess-a", status="TIMEOUT")
+    t0 = time.monotonic()
+    loop_mod._settle_session_costs(paths, {"sess-a"}, grace_seconds=5.0)
+    assert time.monotonic() - t0 < 1.0  # not a candidate -> no wait
+
+
+def test_settle_ignores_sessions_not_in_run_sids(git_repo):
+    paths = setup(git_repo)
+    _write_out(paths, "sess-old", cost=None, finished=False)
+    _write_reaped(paths, "sess-old")
+    t0 = time.monotonic()
+    loop_mod._settle_session_costs(paths, set(), grace_seconds=5.0)  # empty run_sids
+    assert time.monotonic() - t0 < 1.0
+
+
 def test_run_spend_sums_only_given_sids(git_repo):
     paths = setup(git_repo)
     _write_out(paths, "sess-a", cost=0.10)

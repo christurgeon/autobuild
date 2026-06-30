@@ -135,9 +135,13 @@ Module responsibilities:
   boundary. `_supervise` returns the terminal reason
   (`drained` / `settled` / `max_iterations`); `_run_locked` passes it (or `halted` from the
   `BaseBranchLeak` handler) to `_finish_run`, which writes `.autobuild/run-summary.json`
-  (counts + per-task integration outcome/attempts/wall-time + stuck list, reusing
+  (counts + per-task integration outcome/attempts/wall-time + cost + stuck list, reusing
   `collect_status`) and prints a short digest — best-effort, so a summary-write failure
-  never masks the real outcome or a re-raised halt.
+  never masks the real outcome or a re-raised halt. Before reading costs it calls
+  `_settle_session_costs` (bounded, best-effort): real `claude` flushes its cost-bearing
+  stream-json `result` event just AFTER `result.json` (which the harness reaps on), so the
+  final draining session(s) are given a short grace to flush before the summary reads them,
+  scoped to this run's own sessions via `run_sids` (#49).
   Two **worktree-isolation guards** also live here: `_assert_base_clean` (run refuses to start
   with a dirty base tree — uncommitted source a stray `git add -A` could sweep; `tasks/` +
   `.autobuild/` exempt, override `AUTOBUILD_ALLOW_DIRTY_BASE=1`) and `base_leak_commits`, which
