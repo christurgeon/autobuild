@@ -49,6 +49,9 @@ class Config:
     timeout_max_retries: int = 2      # int >= 0; auto-retries for a timed-out task
                                       # (0 = block on first timeout). Each retry
                                       # re-spends task_timeout_seconds.
+    # --- operator notifications ----------------------------------------------
+    notify_command: str = ""  # shell command run on coarse run events (done / halt /
+                              # needs_human); "" disables notifications entirely.
 
 
 # Top-level keys autobuild understands. Anything else is a likely typo and warned.
@@ -114,6 +117,17 @@ def load_config(path: Path) -> Config:
         v = data[key]
         if not isinstance(v, str) or not v.strip():
             problems.append(f"{key} must be a non-empty string (got {v!r})")
+            return default
+        return v
+
+    def want_str_opt(key: str, default: str) -> str:
+        # Like want_str but ALLOWS the empty string (an empty value is a meaningful
+        # "disabled" — e.g. notify_command). Only a non-string is a problem.
+        if key not in data:
+            return default
+        v = data[key]
+        if not isinstance(v, str):
+            problems.append(f"{key} must be a string (got {v!r})")
             return default
         return v
 
@@ -183,6 +197,7 @@ def load_config(path: Path) -> Config:
     kill_grace_seconds = want_int("kill_grace_seconds", defaults.kill_grace_seconds)
     timeout_max_retries = want_int("timeout_max_retries", defaults.timeout_max_retries,
                                    minimum=0)
+    notify_command = want_str_opt("notify_command", defaults.notify_command)
 
     if problems:
         raise ConfigError(problems, path)
@@ -207,4 +222,5 @@ def load_config(path: Path) -> Config:
         task_timeout_seconds=task_timeout_seconds,
         kill_grace_seconds=kill_grace_seconds,
         timeout_max_retries=timeout_max_retries,
+        notify_command=notify_command,
     )

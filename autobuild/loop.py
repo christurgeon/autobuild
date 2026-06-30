@@ -67,6 +67,39 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# --- operator notifications --------------------------------------------------
+
+_NOTIFY_TIMEOUT_SECONDS = 30  # bound a wedged notifier so it can never hang the run
+
+
+def _notify(config: Config, event: str, message: str) -> None:
+    """Best-effort operator notification — the single choke point for every event.
+
+    When `config.notify_command` is non-empty, run it via the shell with the event type
+    and message exposed as the environment variables `AUTOBUILD_EVENT` and
+    `AUTOBUILD_MESSAGE` (the operator wires those to Telegram / push / email / whatever).
+    Bounded by a timeout so a wedged notifier can't hang the run, and ALL failures
+    (non-zero exit, timeout, OSError) are swallowed with a `warn(...)` — a notification
+    problem must NEVER break or halt a run.
+
+    The command is operator-controlled (≈ a shell), so this is not a security boundary —
+    same posture as the permission allowlist (see the README security note)."""
+    cmd = (config.notify_command or "").strip()
+    if not cmd:
+        return  # notifications disabled — no subprocess, no env churn
+    env = {**os.environ, "AUTOBUILD_EVENT": event, "AUTOBUILD_MESSAGE": message}
+    try:
+        r = subprocess.run(cmd, shell=True, env=env, capture_output=True, text=True,
+                           timeout=_NOTIFY_TIMEOUT_SECONDS)
+        if r.returncode != 0:
+            warn(f"notify_command exited {r.returncode} for event '{event}' (ignored)")
+    except subprocess.TimeoutExpired:
+        warn(f"notify_command timed out after {_NOTIFY_TIMEOUT_SECONDS}s for "
+             f"event '{event}' (ignored)")
+    except OSError as exc:
+        warn(f"notify_command failed for event '{event}': {exc} (ignored)")
+
+
 def _read_json(path: Path) -> dict | None:
     """Read `path` and parse it as a JSON object via parse_leading_json (tolerating
     stray trailing data after a valid leading object). Returns None if the file is
@@ -603,6 +636,8 @@ def _reap_session_locked(sdir: Path, result: dict, config: Config, paths: Paths)
         if task:
             set_status(task.path, "blocked")
         warn(f"{sid}: {tid} NEEDS_HUMAN — see {sdir / 'result.json'}")
+        _notify(config, "needs_human",
+                f"{tid}: {result.get('summary') or 'needs human attention'} (session {sid})")
     elif status == "TIMEOUT":
         # A killed-past-deadline session: NEVER integrated or verified (its tree is
         # incomplete), and no follow-ups filed. Re-queue for another attempt or, once the
@@ -911,15 +946,17 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float,
     try:
         reason = _supervise(paths, config, running, sleep_seconds=sleep_seconds,
                             monotonic=monotonic)
-    except BaseBranchLeak:
+    except BaseBranchLeak as exc:
         # base is corrupt (a session escaped onto it): stop now and KILL any sessions
         # still running — they'd only burn tokens on a doomed run, and the same leak
         # check would refuse to integrate them anyway. Leave a summary (reason `halted`)
-        # so even an aborted run is legible, then re-raise for the CLI to report.
-        # `running` is mutated in place by _supervise, so it holds the live set.
+        # so even an aborted run is legible, notify the operator of the halt, then
+        # re-raise for the CLI to report. `running` is mutated in place by _supervise,
+        # so it holds the live set.
         for rs in running:
             _kill_group(rs, config.kill_grace_seconds)
         _finish_run(paths, config, "halted")
+        _notify(config, "halt", str(exc))
         raise
     _finish_run(paths, config, reason)
     status(paths, config)
@@ -1225,15 +1262,31 @@ def _task_digest_reason(row: dict, stuck: dict[str, str]) -> str:
     return "; ".join(bits) or row["status"]
 
 
+def _run_end_message(summary: dict) -> str:
+    """The `done`-event notification body, built from the run summary: the terminal reason
+    plus the per-status counts, so the operator learns what merged / blocked / timed out
+    without opening run-summary.json."""
+    counts = summary.get("counts") or {}
+    counts_str = ", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "no tasks"
+    return f"run ended ({summary.get('reason', '?')}): {counts_str}"
+
+
 def _finish_run(paths: Paths, config: Config, reason: str) -> None:
-    """Write the run summary and print its digest — best-effort. A failure here must never
-    mask the run's real outcome (or a re-raised BaseBranchLeak halt), so any error is
-    warned and swallowed rather than propagated."""
+    """Write the run summary, print its digest, and notify the operator of the run end —
+    all best-effort. A failure here must never mask the run's real outcome (or a re-raised
+    BaseBranchLeak halt), so any error is warned and swallowed rather than propagated.
+
+    The `done` notification fires for every non-halted end (drained / settled /
+    max_iterations); the `halt` end gets its own `halt` event from the BaseBranchLeak
+    handler, so we suppress the `done` event here to avoid a double notification."""
+    summary = None
     try:
         summary = write_run_summary(paths, config, reason)
         _print_run_digest(summary)
     except Exception as exc:  # noqa: BLE001 — summary is advisory; never let it break a run
         warn(f"could not write run summary: {exc}")
+    if reason != "halted" and summary is not None:
+        _notify(config, "done", _run_end_message(summary))
 
 
 # --- clean -------------------------------------------------------------------

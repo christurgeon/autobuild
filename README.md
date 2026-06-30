@@ -185,6 +185,35 @@ kill_grace_seconds: 20        # SIGTERM -> wait -> SIGKILL grace (int >= 1)
 timeout_max_retries: 2        # auto-retries for a timed-out task before it's left
                               # terminal `timeout` (int >= 0; 0 = block on the first
                               # timeout). Each retry re-spends task_timeout_seconds.
+
+notify_command: ""            # shell command run on coarse run events ("" = disabled).
+                              # See "Notifications" below.
+```
+
+### Notifications
+
+A long, walk-away `run` can ping you when something worth knowing happens — without you
+watching the logs. Set `notify_command` to **any shell command**; autobuild runs it on a
+small set of coarse, run-level events and passes the event + message as environment
+variables. It is generic by design — wire it to Telegram, `ntfy`, email, a desktop
+notifier, whatever — nothing is hardcoded into the harness.
+
+| `AUTOBUILD_EVENT` | When it fires | `AUTOBUILD_MESSAGE` |
+|---|---|---|
+| `done` | the run ended (`drained` / `settled` / `max_iterations`) | the terminal reason + per-status task counts |
+| `halt` | a session escaped onto `base_branch` and the run **halted** (auto-merge) | the leaking base branch / session / task |
+| `needs_human` | a session reported `NEEDS_HUMAN` | the task id + its summary |
+
+Events are **low-volume by design** — run-level plus `NEEDS_HUMAN`, never one-per-task —
+so a notifier won't spam you. The hook is **best-effort**: it's bounded by a timeout and
+**every failure is swallowed** (and warned), so a wedged or broken notifier can never hang
+or break a run. The command is a shell *you* control, so — like the permission allowlist —
+it is **not a security boundary**.
+
+```yaml
+# Example: Telegram via curl (TOKEN / CHAT from the environment)
+notify_command: 'curl -s -X POST "https://api.telegram.org/bot$TOKEN/sendMessage"
+  --data-urlencode "chat_id=$CHAT" --data-urlencode "text=[$AUTOBUILD_EVENT] $AUTOBUILD_MESSAGE"'
 ```
 
 ## Security posture (read before running unattended)

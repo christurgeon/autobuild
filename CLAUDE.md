@@ -114,7 +114,13 @@ Module responsibilities:
   `SIGTERM` → `kill_grace_seconds` → `SIGKILL` over the session's process group), `reconcile`
   (startup crash recovery), `verify_checks`, `integrate`, `file_followups`, `status`,
   `write_run_summary`, and `clean`. The CLI `reap` maps to `reap` here (a lock-aware
-  wrapper), not `reap_all` directly. `_supervise` returns the terminal reason
+  wrapper), not `reap_all` directly. `_notify(config, event, message)` is the single,
+  best-effort **notification choke point**: when `config.notify_command` is set it runs that
+  shell command with `AUTOBUILD_EVENT`/`AUTOBUILD_MESSAGE` in the env, bounded by a timeout
+  and swallowing every failure (a broken notifier never breaks a run). It fires on three
+  coarse events — `done` (run end, in `_finish_run`), `halt` (the `BaseBranchLeak` path), and
+  `needs_human` (`_reap_session_locked`) — and is operator-controlled shell, not a security
+  boundary. `_supervise` returns the terminal reason
   (`drained` / `settled` / `max_iterations`); `_run_locked` passes it (or `halted` from the
   `BaseBranchLeak` handler) to `_finish_run`, which writes `.autobuild/run-summary.json`
   (counts + per-task integration outcome/attempts/wall-time + stuck list, reusing
