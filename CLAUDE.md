@@ -112,8 +112,14 @@ Module responsibilities:
   harvesting (`_harvest` / `_classify_sentinel`), the **per-session timeout** (deadline-bounded
   waits via `_next_wait` / `_wait_until_next_event`, and `_kill_group` / `_signal_session` —
   `SIGTERM` → `kill_grace_seconds` → `SIGKILL` over the session's process group), `reconcile`
-  (startup crash recovery), `verify_checks`, `integrate`, `file_followups`, `status`, and
-  `clean`. The CLI `reap` maps to `reap` here (a lock-aware wrapper), not `reap_all` directly.
+  (startup crash recovery), `verify_checks`, `integrate`, `file_followups`, `status`,
+  `write_run_summary`, and `clean`. The CLI `reap` maps to `reap` here (a lock-aware
+  wrapper), not `reap_all` directly. `_supervise` returns the terminal reason
+  (`drained` / `settled` / `max_iterations`); `_run_locked` passes it (or `halted` from the
+  `BaseBranchLeak` handler) to `_finish_run`, which writes `.autobuild/run-summary.json`
+  (counts + per-task integration outcome/attempts/wall-time + stuck list, reusing
+  `collect_status`) and prints a short digest — best-effort, so a summary-write failure
+  never masks the real outcome or a re-raised halt.
   Two **worktree-isolation guards** also live here: `_assert_base_clean` (run refuses to start
   with a dirty base tree — uncommitted source a stray `git add -A` could sweep; `tasks/` +
   `.autobuild/` exempt, override `AUTOBUILD_ALLOW_DIRTY_BASE=1`) and `base_leak_commits`, which
