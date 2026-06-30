@@ -1043,6 +1043,33 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float,
     status(paths, config)
 
 
+def _run_spend(paths: Paths, sids: set[str], cache: dict[str, float]) -> float:
+    """Cumulative USD spend across the sessions THIS run spawned (`sids`) — the sum of each
+    session's captured cost (`total_cost_usd` from its stream-json `result` event).
+
+    Scoped to `sids`, NOT every session dir on disk: session dirs persist after reaping
+    (only `clean` removes them), so summing all of them would pre-charge a fresh `run` with
+    a prior run's spend and make a budget-capped backlog un-resumable. Counting only this
+    run's own sessions keeps the budget per-run (consistent with run_budget_seconds) while
+    still totalling a single run's real spend, retries included.
+
+    `cache` memoizes FINISHED sessions, whose cost can never change again, so each pass only
+    re-reads this run's still-running sessions (≤ max_parallel small files). A session with
+    no `result` event yet — running, killed, or crashed — contributes 0; its cost is unknown,
+    never guessed."""
+    total = 0.0
+    for sid in sids:
+        if sid in cache:
+            total += cache[sid]
+            continue
+        prog = read_progress(paths.sessions_dir / sid / "session.out")
+        cost = prog.cost_usd or 0.0
+        if prog.finished:
+            cache[sid] = cost  # frozen: a finished session's cost is immutable
+        total += cost
+    return total
+
+
 def _supervise(paths: Paths, config: Config, running: list[RunningSession], *,
                sleep_seconds: float, monotonic=time.monotonic) -> str:
     """The scheduling loop. Appends spawned sessions to `running` and keeps it in sync

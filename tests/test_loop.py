@@ -75,6 +75,52 @@ def make_session(paths, tid, status, *, summary="s", commit="", followups=None):
     return sdir
 
 
+# ---- cost accounting (run_budget_usd) --------------------------------------
+
+def _write_out(paths, sid, *, cost=None, finished=True, messages=1):
+    sdir = paths.sessions_dir / sid
+    sdir.mkdir(parents=True, exist_ok=True)
+    lines = ['{"type":"assistant","message":{"model":"m"}}'] * messages
+    if finished:
+        c = "" if cost is None else f',"total_cost_usd":{cost}'
+        lines.append('{"type":"result","subtype":"success"' + c + "}")
+    (sdir / "session.out").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return sdir
+
+
+def test_run_spend_sums_only_given_sids(git_repo):
+    paths = setup(git_repo)
+    _write_out(paths, "sess-a", cost=0.10)
+    _write_out(paths, "sess-b", cost=0.25)
+    _write_out(paths, "sess-other", cost=99.0)   # a prior run's session — must be excluded
+    _write_out(paths, "sess-running", cost=None, finished=False)  # in-flight -> 0
+    sids = {"sess-a", "sess-b", "sess-running"}
+    cache: dict[str, float] = {}
+    assert abs(loop_mod._run_spend(paths, sids, cache) - 0.35) < 1e-9
+
+
+def test_run_spend_caches_finished_sessions(git_repo):
+    paths = setup(git_repo)
+    _write_out(paths, "sess-a", cost=0.10)
+    cache: dict[str, float] = {}
+    assert abs(loop_mod._run_spend(paths, {"sess-a"}, cache) - 0.10) < 1e-9
+    assert cache == {"sess-a": 0.10}
+    # mutate the file: a finished session's cost is frozen in the cache, not re-read
+    _write_out(paths, "sess-a", cost=5.0)
+    assert abs(loop_mod._run_spend(paths, {"sess-a"}, cache) - 0.10) < 1e-9
+
+
+def test_run_spend_running_session_not_cached(git_repo):
+    paths = setup(git_repo)
+    _write_out(paths, "sess-a", cost=None, finished=False)
+    cache: dict[str, float] = {}
+    assert loop_mod._run_spend(paths, {"sess-a"}, cache) == 0.0
+    assert cache == {}  # still running -> not frozen
+    # once it finishes, its cost is picked up
+    _write_out(paths, "sess-a", cost=0.42)
+    assert abs(loop_mod._run_spend(paths, {"sess-a"}, cache) - 0.42) < 1e-9
+
+
 # ---- reaper acts on each sentinel ------------------------------------------
 
 def test_reap_complete_branch_mode(git_repo):
