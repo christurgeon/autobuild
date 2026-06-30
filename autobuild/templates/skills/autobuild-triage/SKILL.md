@@ -22,43 +22,42 @@ in files and git — read it before proposing anything.
    yourself by checking each task's `depends_on` against the others' statuses.
 2. **Investigate each non-`done` task that should have progressed.** For a `blocked` /
    `timeout` / unexpectedly-stuck task:
-   - Read its session dir under `.autobuild/sessions/<id>/`. **`result.json` may be
-     ABSENT — that is the normal shape of a `timeout` or a crashed/killed session, not
-     corruption.** When it's missing (or `plan.md` is missing — also fine), reconstruct
-     what happened from `meta.json` + `progress.log` + the preserved branch instead.
-   - **Check for `<id>/leak.json`** — if present, this session committed onto `base_branch`
+   - Read its session dir under `.autobuild/sessions/<id>/`. **`result.json` may be ABSENT
+     — that's the normal shape of a `timeout` or a crashed/killed session, not corruption.**
+     When it's missing (or `plan.md` is missing — also fine), reconstruct what happened from
+     `meta.json` + `progress.log` + the preserved branch instead.
+   - Check for `<id>/leak.json` — if present, this session committed onto `base_branch`
      instead of its worktree (a worktree escape, or a concurrent commit to base). See the
-     **base-leak** cause below; this is the one failure that can stop the whole run.
-   - Inspect the **preserved branch** `autobuild/<task-id>`: `git log` and `git diff`
-     against `base_branch`. A blocked-before-implementing task often has **0 commits**; a
-     timed-out one may have WIP commits that wouldn't pass checks.
+     base-leak cause below; this is the one failure that can stop the whole run.
+   - Inspect the preserved branch `autobuild/<task-id>`: `git log` and `git diff` against
+     `base_branch`. A blocked-before-implementing task often has 0 commits; a timed-out one
+     may have WIP commits that wouldn't pass checks.
 3. **Classify the cause** — one of:
    - **ambiguous / under-specified task** (BLOCKED with a "spec unclear" summary),
-   - **dependency not done** — but **`status` STUCK names only ONE blocker per task.**
-     Always read the task's `depends_on` and check **every** listed dependency's status;
-     a task can be blocked by several (e.g. one `blocked` + one `timeout`) while STUCK
-     surfaces just one.
+   - **dependency not done** — but **`status` STUCK names only ONE blocker per task.** Read
+     the task's `depends_on` and check every listed dependency's status; a task can be
+     blocked by several (e.g. one `blocked` + one `timeout`) while STUCK surfaces just one.
    - **checks failed** (COMPLETE but the reaper's verify re-run blocked it — see
      `<session>/checks.log` if present),
    - **ran out of time** (`timeout`: deadline hit. The partial `autobuild/<id>` branch is
-     **preserved** until a retry re-forks from base — on a settled-without-retry run it's
-     still there to inspect; `progress.log` usually shows what ate the budget).
+     preserved until a retry re-forks from base — on a settled-without-retry run it's still
+     there to inspect; `progress.log` usually shows what ate the budget).
    - **needs a human decision** (NEEDS_HUMAN).
    - **base leak** (`<id>/leak.json` present) — the session committed onto `base_branch`
-     instead of its own branch. `leak.json` lists the offending `commits`. In `auto-merge`
-     this **halts the run** (`BaseBranchLeak`, exit 2) and re-fires every run until base is
+     instead of its own branch; `leak.json` lists the offending `commits`. In `auto-merge`
+     this halts the run (`BaseBranchLeak`, exit 2) and re-fires every run until base is
      clean; in `pr`/`branch` it only blocks that task. Recover: move the leaked commit(s)
      onto a branch and reset `base_branch` back (`git branch salvage <sha>; git reset --hard
      <sha-before-leak>`), then re-queue the task (`status: todo`). If it was a *concurrent*
      human/CI commit (not a real escape), just keep it and re-queue the task.
 4. **Propose a concrete next action per task** — tie it to the cause: edit the task to
-   clarify/scope it down and **re-queue** (set `status: todo`; the next `run` re-forks from
+   clarify/scope it down and re-queue (set `status: todo`; the next `run` re-forks from
    base), split it into follow-ups, fix the config (raise `task_timeout_seconds`, correct a
    check command), or escalate to the human. **When a dependent is blocked by multiple
-   upstream tasks, every one must reach `done` before it can run — propose fixes for all of
-   them, not just the one STUCK named.** Note: a task left terminal `timeout` has already
-   spent its `timeout_max_retries` budget, so it will **not** auto-retry — re-queueing it is
-   a manual `status: todo` flip.
+   upstream tasks, every one must reach `done` before it can run** — propose fixes for all
+   of them, not just the one STUCK named. Note: a task left terminal `timeout` has already
+   spent its `timeout_max_retries` budget, so it won't auto-retry — re-queueing it is a
+   manual `status: todo` flip.
 5. **PR review for dependency chains (pr mode) — only if applicable.** *Skip this unless
    there are `done` tasks whose PRs form a dependency chain.* For a chain A → B → C,
    explain the stacked-history limitation — each PR contains its dependencies' commits —
