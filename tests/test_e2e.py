@@ -195,6 +195,27 @@ def test_e2e_followup_filed_through_spawn_and_reap(git_repo, stub_bin, monkeypat
     assert any("discovered-work" in n for n in names)
 
 
+def test_e2e_session_out_streams_parseable_json(git_repo, stub_bin, monkeypatch):
+    """Issue #40: session.out is now stream-json (the default text format buffered it to
+    0 bytes). After a run it must be non-empty and parse to per-session progress — the
+    assistant-message count and the terminal result event's cost."""
+    from autobuild.progress import read_progress
+    stub_bin(STUB_MSGS=3, STUB_COST=0.07)
+    paths = init_project(git_repo, monkeypatch, integration="auto-merge")
+    write_task(paths, "task-001")
+
+    loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=5)
+
+    assert statuses(paths)["task-001"] == "done"
+    sdir = next(d for d in paths.sessions_dir.iterdir() if d.is_dir())
+    out = (sdir / "session.out").read_text()
+    assert out.strip(), "session.out must not be empty (stream-json, not buffered text)"
+    prog = read_progress(sdir / "session.out")
+    assert prog.messages == 3
+    assert prog.finished is True
+    assert abs(prog.cost_usd - 0.07) < 1e-9
+
+
 def test_e2e_waiting_for_a_session_does_not_burn_max_iterations(git_repo, stub_bin, monkeypatch):
     """Regression: a session that spans many poll passes must NOT exhaust the
     max_iterations safety budget. The cap counts scheduling rounds (work started),

@@ -12,6 +12,9 @@ Env knobs a test sets before driving the loop:
   STUB_FOLLOWUPS         JSON array for result.json "followups"  (default [])
   STUB_STALL             "1" -> write NOTHING, exit 0 (simulates a dead session)
   STUB_NO_COMMIT         "1" -> skip the git commit
+  STUB_STREAM            "0" -> skip the stream-json stdout transcript (default "1")
+  STUB_MSGS              # of assistant events in the transcript        (default 2)
+  STUB_COST              total_cost_usd in the terminal result event    (default 0.01)
 """
 import json
 import os
@@ -83,6 +86,27 @@ def main():
                        cwd=cwd, check=True)
         commit_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cwd,
                                     capture_output=True, text=True).stdout.strip()
+
+    # Emit a stream-json transcript to stdout (the harness redirects it to session.out) so
+    # the progress parser + cost budget have realistic input: an init line, STUB_MSGS
+    # assistant events, then a terminal `result` event carrying STUB_COST. Emitted ONLY here
+    # on the normal completion path — past the STUB_STALL early-return and STUB_SLEEP — so a
+    # stalled/killed session writes no `result` event and therefore reads as 0 cost, exactly
+    # like a real killed `claude`. STUB_STREAM=0 disables it (legacy text-mode behavior).
+    if os.environ.get("STUB_STREAM", "1") == "1":
+        msgs = int(os.environ.get("STUB_MSGS", "2"))
+        cost = float(os.environ.get("STUB_COST", "0.01"))
+        def _emit(obj):
+            sys.stdout.write(json.dumps(obj) + "\n")
+            sys.stdout.flush()
+        _emit({"type": "system", "subtype": "init", "model": "claude-stub"})
+        for i in range(msgs):
+            _emit({"type": "assistant",
+                   "message": {"model": "claude-stub",
+                               "content": [{"type": "text", "text": f"turn {i}"}]}})
+        _emit({"type": "result", "subtype": "success", "num_turns": msgs,
+               "total_cost_usd": cost,
+               "usage": {"input_tokens": 100, "output_tokens": 20}})
 
     if sdir:
         os.makedirs(sdir, exist_ok=True)
