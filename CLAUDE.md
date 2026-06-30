@@ -145,6 +145,14 @@ Module responsibilities:
   claiming or spawning, raising `PreflightError` so a misconfigured host aborts early instead
   of wasting sessions. doctor only *reports* (the base-tree-clean check is a WARN); `run` keeps
   enforcing via `_assert_base_clean`. Imports loop helpers, so loop imports it lazily.
+- **`autobuild/progress.py`** — parse a session's stream-json `session.out` (one JSON event
+  per line) into a small `SessionProgress` (`messages` = assistant-event count, a liveness
+  proxy; `cost_usd` from the terminal `result` event; `finished`). **Total by construction**
+  (a torn/partial/non-JSON line is skipped, never raised) because `autobuild status` and the
+  supervisor read the file while `claude` is still writing it. Sessions are spawned with
+  `--output-format stream-json --verbose` (so `session.out` streams live instead of buffering
+  to 0 bytes) and `stdin=DEVNULL` (drops the CLI's ~3s no-stdin wait); `status` surfaces the
+  parsed progress, and the cost budget sums each session's `cost_usd`.
 - **`autobuild/paths.py`** — the frozen `Paths` dataclass.
 
 ### The session lifecycle / sentinel protocol (the core data flow)
