@@ -45,6 +45,15 @@ uv run autobuild status          # task + session state
 configured. The e2e tests (`tests/test_e2e.py`) drive the whole loop against a **stub `claude`
 on `PATH`** (`tests/fixtures/claude`, wired up in `tests/conftest.py`), so they spend no tokens.
 
+Because the stub is hand-coded to match the harness, it can't catch drift between
+`templates/CLAUDE.md` (the session contract) and real agent behavior. `tools/live_smoke.py`
+closes that: an **opt-in, ad-hoc** runner that drives one real `claude -p` task end-to-end and
+asserts the whole contract held. It spends real tokens + needs a `claude` login, so it lives
+**outside `tests/`** (pyproject `testpaths = ["tests"]`) and is **never collected by pytest/CI**
+— run it by hand after touching the contract, the spawn, or the reaper:
+`uv run python tools/live_smoke.py` (env knobs: `AUTOBUILD_SMOKE_MODEL`, `AUTOBUILD_SMOKE_KEEP`,
+`AUTOBUILD_SMOKE_DIR`).
+
 ## Architecture
 
 `autobuild/cli.py` is the thin dispatcher: `argparse` maps a subcommand to a function (in
