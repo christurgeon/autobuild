@@ -387,6 +387,42 @@ def test_integration_max_retries_bool_raises(tmp_path):
     assert "integration_max_retries" in str(e.value)
 
 
+# --- whole-run wall-clock budget: run_budget_seconds (min 0, default 0 = off) --
+
+def test_run_budget_seconds_defaults_to_zero(tmp_path):
+    assert load_config(tmp_path / "nope.yml").run_budget_seconds == 0
+
+
+def test_run_budget_seconds_zero_is_allowed(tmp_path):
+    # 0 = "no wall-clock cap" — a legitimate value the >= 1 ints reject.
+    cfg = load_config(_write(tmp_path, "run_budget_seconds: 0\n"))
+    assert cfg.run_budget_seconds == 0
+
+
+def test_run_budget_seconds_positive_loads(tmp_path):
+    cfg = load_config(_write(tmp_path, "run_budget_seconds: 3600\n"))
+    assert cfg.run_budget_seconds == 3600
+
+
+def test_run_budget_seconds_negative_raises(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, "run_budget_seconds: -1\n"))
+    assert "run_budget_seconds" in str(e.value)
+
+
+def test_run_budget_seconds_non_int_raises(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, "run_budget_seconds: forever\n"))
+    assert "run_budget_seconds" in str(e.value)
+
+
+def test_run_budget_seconds_bool_raises(tmp_path):
+    # bool is an int subclass; must be rejected like the other int knobs
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, "run_budget_seconds: true\n"))
+    assert "run_budget_seconds" in str(e.value)
+
+
 def test_config_error_names_path(tmp_path):
     p = _write(tmp_path, "integration: nope\n")
     with pytest.raises(ConfigError) as e:

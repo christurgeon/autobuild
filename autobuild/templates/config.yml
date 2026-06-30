@@ -7,6 +7,13 @@ max_parallel: 3               # integer >= 1: WIP limit / concurrent worktrees
 base_branch: main             # non-empty string: branches fork from and merge into this
 max_iterations: 100           # integer >= 1: global safety stop for the outer loop
 
+# Whole-run WALL-CLOCK ceiling. Once a run has been going longer than this, it stops
+# claiming new tasks, lets in-flight sessions drain, and reports the cap (distinct from
+# the max_iterations message). 0 = unlimited (today's behavior). The clock is monotonic
+# and in-memory, so a killed/resumed run restarts the budget rather than resuming it.
+# Independent of per-session task_timeout_seconds below.
+run_budget_seconds: 0         # integer >= 0: wall-clock budget for the whole run (0 = off)
+
 # What happens to a task's branch when its session reports COMPLETE:
 #   pr         -> open a pull request for human review (default, safest)
 #   auto-merge -> if checks pass, merge the branch into base_branch

@@ -1253,6 +1253,57 @@ def test_next_wait_uses_sleep_when_no_deadlines():
     assert loop_mod._next_wait([rs], sleep_seconds=2.0, now=0.0) == 2.0
 
 
+# ---- task-004: whole-run wall-clock budget (run_budget_seconds) -------------
+
+def _stepping_clock(values):
+    """A monotonic stand-in returning each value once, then STICKING on the last — so
+    the exact number of calls past the jump (extra settle passes) doesn't matter."""
+    vals = list(values)
+    def clock():
+        return vals.pop(0) if len(vals) > 1 else vals[0]
+    return clock
+
+
+def test_run_budget_stops_claiming_drains_and_reports(git_repo, stub_bin, capsys):
+    """A wall-clock budget that trips after the first scheduling round: the loop stops
+    claiming new work, STILL drains/reaps the session it already spawned, leaves the
+    remaining todo task unclaimed, and reports the wall-clock cap — not the iteration cap."""
+    stub_bin()  # default: each spawned session writes COMPLETE quickly
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="todo", priority=1)
+    add_task(paths, "task-002", status="todo", priority=2)
+    # base call -> deadline = 0 + 100 = 100; iter1 over_time check at t=0 (under) claims one
+    # task; iter2 check at t=1000 (past the deadline) stops claiming. max_parallel=1 so only
+    # one task is ever in flight, leaving task-002 to be the one we decline to start.
+    clock = _stepping_clock([0.0, 0.0, 1000.0])
+    cfg = Config(claude_cmd="claude", integration="branch", max_parallel=1,
+                 run_budget_seconds=100)
+    loop_mod.run(paths, cfg, sleep_seconds=0.0, monotonic=clock)
+
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"   # drained + reaped
+    assert read_task(paths.tasks_dir / "task-002.md").status == "todo"   # never claimed
+    out = capsys.readouterr().out
+    assert "hit run_budget_seconds (100s)" in out
+    assert "hit max_iterations" not in out                               # the right cap named
+
+
+def test_run_budget_zero_disables_time_cap(git_repo, stub_bin, capsys):
+    """run_budget_seconds=0 preserves today's behavior: no wall-clock cap fires (the
+    injected clock is never even consulted), so the whole backlog drains normally."""
+    stub_bin()
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="todo", priority=1)
+    add_task(paths, "task-002", status="todo", priority=2)
+    clock = _stepping_clock([0.0, 1e9])  # would be "past" any deadline — but the budget is off
+    cfg = Config(claude_cmd="claude", integration="branch", max_parallel=2,
+                 run_budget_seconds=0)
+    loop_mod.run(paths, cfg, sleep_seconds=0.0, monotonic=clock)
+
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"
+    assert read_task(paths.tasks_dir / "task-002.md").status == "done"   # nothing stranded
+    assert "run_budget_seconds" not in capsys.readouterr().out           # no time-cap report
+
+
 # ---- audit C-1: a non-dict result.json must never crash run/reap/status -----
 
 NON_DICT_RESULTS = {"empty-list": "[]", "list-str": '["x"]', "string": '"s"', "number": "5"}
