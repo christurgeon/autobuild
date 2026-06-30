@@ -191,7 +191,8 @@ def test_missing_claude_returns_no_pgid_or_deadline(git_repo):
 
 
 def test_reconcile_handles_meta_with_pgid(git_repo):
-    """Regression: meta.json now carries pgid; reconcile still BLOCKs an orphan."""
+    """Regression: meta.json now carries pgid; reconcile still recovers an orphan (as a
+    synthetic TIMEOUT it re-queues, issue #38)."""
     from tests.test_loop import setup, add_task
     paths = setup(git_repo)
     add_task(paths, "task-001", status="in-progress")
@@ -200,7 +201,7 @@ def test_reconcile_handles_meta_with_pgid(git_repo):
     (sdir / "meta.json").write_text(json.dumps(
         {"task": "task-001", "branch": "autobuild/task-001", "pgid": 4242}))
     loop_mod.reconcile(paths, sweep_in_progress=True)
-    assert json.loads((sdir / "result.json").read_text())["status"] == "BLOCKED"
+    assert json.loads((sdir / "result.json").read_text())["status"] == "TIMEOUT"
 
 
 # ---- task-104: monotonic deadline -------------------------------------------

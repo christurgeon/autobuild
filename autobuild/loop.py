@@ -792,8 +792,19 @@ def reconcile(paths: Paths, *, sweep_in_progress: bool = False) -> None:
                     pgid = meta.get("pgid")
                     if _kill_orphan_group(pgid):
                         warn(f"killed orphaned process group {pgid} for {tid}")
-                    warn(f"orphaned in-progress session {sdir.name}; marking {tid} BLOCKED")
-                    write_sentinel_if_absent(sdir, tid, "BLOCKED",
+                    # A crash/env-kill leaves the SAME state a deadline kill does: a session
+                    # killed before it could write result.json, its worktree unverified and
+                    # possibly partial. Recover it exactly like a timeout — a synthetic TIMEOUT
+                    # sentinel the reaper re-queues (force-deleting the partial branch so the
+                    # retry re-forks from base, bounded by timeout_max_retries) or, once the
+                    # budget is spent, leaves terminal `timeout`. base_leak_commits still runs
+                    # first at reap for every status, so a worktree escape onto base is blocked
+                    # (and, under auto-merge, halts), not silently retried. We recover BOTH the
+                    # absent- and corrupt-sentinel cases: a crashed run can't tell a self-exit
+                    # from an env-kill, so retryable-and-budget-bounded is the safe default
+                    # (mirrors _harvest, where a killed-without-result session is TIMEOUT).
+                    warn(f"orphaned in-progress session {sdir.name}; recovering {tid} as TIMEOUT")
+                    write_sentinel_if_absent(sdir, tid, "TIMEOUT",
                                              f"orphaned: run restarted while session was in-progress; {reason}")
     prune_worktrees(paths)
 
