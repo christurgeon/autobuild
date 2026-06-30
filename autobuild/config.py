@@ -22,6 +22,10 @@ class Config:
     max_parallel: int = 3
     base_branch: str = "main"
     max_iterations: int = 100
+    run_budget_seconds: int = 0  # int >= 0; whole-run wall-clock ceiling (0 = unlimited).
+                                 # Once spent the loop stops claiming new work, drains what's
+                                 # in flight, and reports the cap. Monotonic + in-memory, so a
+                                 # killed/resumed run does not resume the clock.
     integration: str = "pr"  # pr | auto-merge | branch
     integration_max_retries: int = 2  # int >= 0; extra attempts for transient remote ops
                                       # (git push / gh pr create) during integration
@@ -171,6 +175,8 @@ def load_config(path: Path) -> Config:
     claude_cmd = want_str("claude_cmd", defaults.claude_cmd)
     max_parallel = want_int("max_parallel", defaults.max_parallel)
     max_iterations = want_int("max_iterations", defaults.max_iterations)
+    run_budget_seconds = want_int("run_budget_seconds", defaults.run_budget_seconds,
+                                  minimum=0)
 
     integration = want_enum("integration", defaults.integration, VALID_INTEGRATIONS)
     integration_max_retries = want_int("integration_max_retries",
@@ -201,6 +207,7 @@ def load_config(path: Path) -> Config:
         max_parallel=max_parallel,
         base_branch=base_branch,
         max_iterations=max_iterations,
+        run_budget_seconds=run_budget_seconds,
         integration=integration,
         integration_max_retries=integration_max_retries,
         checks=checks,

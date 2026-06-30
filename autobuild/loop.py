@@ -898,13 +898,17 @@ def _wait_until_next_event(running: list[RunningSession], sleep_seconds: float) 
     time.sleep(wait)
 
 
-def run(paths: Paths, config: Config, *, sleep_seconds: float = 2.0) -> None:
+def run(paths: Paths, config: Config, *, sleep_seconds: float = 2.0,
+        monotonic=time.monotonic) -> None:
     """Drive the outer loop until the backlog drains. Holds the run lock for the
     whole lifetime: a second `run` is refused (RunLockHeld) and a `reap` running
     alongside this one cannot reconcile the sessions this run owns. Because we hold
-    the lock, the startup reconcile is free to BLOCK genuinely orphaned sessions."""
+    the lock, the startup reconcile is free to BLOCK genuinely orphaned sessions.
+
+    `monotonic` is the wall-clock source for the optional run budget; injectable so
+    tests can jump past the deadline without sleeping (mirrors `sleep_seconds`)."""
     with run_lock(paths.run_lock):
-        _run_locked(paths, config, sleep_seconds=sleep_seconds)
+        _run_locked(paths, config, sleep_seconds=sleep_seconds, monotonic=monotonic)
 
 
 def _assert_base_clean(paths: Paths) -> None:
@@ -923,7 +927,8 @@ def _assert_base_clean(paths: Paths) -> None:
             f"sweep them into a task commit. Set AUTOBUILD_ALLOW_DIRTY_BASE=1 to override.")
 
 
-def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float) -> None:
+def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float,
+                monotonic=time.monotonic) -> None:
     paths.ensure_runtime_dirs()
     _assert_base_clean(paths)
     # Critical preflight (claude on PATH, git identity) BEFORE claiming or spawning, so a
@@ -931,12 +936,16 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float) -> None:
     # Imported lazily: preflight imports loop's helpers, so a top-level import would cycle.
     from .preflight import assert_run_preflight
     assert_run_preflight(paths, config)
-    log(f"starting loop (max_parallel={config.max_parallel}, max_iterations={config.max_iterations})")
+    budget = (f", run_budget={config.run_budget_seconds}s"
+              if config.run_budget_seconds > 0 else "")
+    log(f"starting loop (max_parallel={config.max_parallel}, "
+        f"max_iterations={config.max_iterations}{budget})")
     reconcile(paths, sweep_in_progress=True)
 
     running: list[RunningSession] = []
     try:
-        reason = _supervise(paths, config, running, sleep_seconds=sleep_seconds)
+        reason = _supervise(paths, config, running, sleep_seconds=sleep_seconds,
+                            monotonic=monotonic)
     except BaseBranchLeak as exc:
         # base is corrupt (a session escaped onto it): stop now and KILL any sessions
         # still running — they'd only burn tokens on a doomed run, and the same leak
@@ -954,7 +963,7 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float) -> None:
 
 
 def _supervise(paths: Paths, config: Config, running: list[RunningSession], *,
-               sleep_seconds: float) -> str:
+               sleep_seconds: float, monotonic=time.monotonic) -> str:
     """The scheduling loop. Appends spawned sessions to `running` and keeps it in sync
     with the live set IN PLACE (`running[:] = ...`) so a caller catching BaseBranchLeak
     can still see — and kill — what was running when the halt fired.
@@ -964,6 +973,15 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession], *,
     spent with work unstarted) — so the caller records it in the run summary instead
     of re-deriving it. (The `halted` reason is supplied by the BaseBranchLeak handler.)"""
     iteration = 0
+    # Optional whole-run WALL-CLOCK budget: a monotonic deadline computed ONCE here (not per
+    # poll tick — same reasoning as max_iterations below: a long fleet of poll ticks must not
+    # be what trips the cap). Past it, we fold into `over_budget` so the SAME drain-and-report
+    # path handles it — stop claiming, drain in-flight, report — never forking the termination
+    # logic. `monotonic` is injectable so tests jump past the deadline without sleeping. Like
+    # the per-session deadlines, this clock is in-memory: a killed/resumed run does NOT resume
+    # it (it restarts the budget), which is fine and consistent.
+    budget_deadline = (monotonic() + config.run_budget_seconds
+                       if config.run_budget_seconds > 0 else None)
     while True:
         running[:] = _harvest(running, config, paths)
 
@@ -975,7 +993,10 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession], *,
         # claiming but keep draining what's already running (never abandoning in-flight work).
         # (Counting every pass made the cap a ~max_iterations*sleep_seconds wall-clock limit
         # that tripped mid-run and stranded finished-but-unreaped work as in-progress.)
-        over_budget = iteration >= config.max_iterations
+        over_iterations = iteration >= config.max_iterations
+        # The wall-clock budget is, by contrast, deliberately elapsed-time based.
+        over_time = budget_deadline is not None and monotonic() >= budget_deadline
+        over_budget = over_iterations or over_time
         claimed = claim_tasks(free, paths) if (free > 0 and not over_budget) else []
         if claimed:
             iteration += 1
@@ -1002,7 +1023,14 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession], *,
             if over_budget and pending:
                 # Budget spent with work still left: report the cap accurately instead of
                 # claiming a clean drain. In-flight sessions were drained above, so the only
-                # thing unfinished is work we declined to start — raise max_iterations to do more.
+                # thing unfinished is work we declined to start. Name WHICH cap tripped so a
+                # human knows what to raise — the wall-clock budget takes precedence (it's the
+                # hard real-time wall; raise run_budget_seconds), else the iteration cap — and
+                # return that reason so the run summary records which cap ended the run.
+                if over_time:
+                    warn(f"hit run_budget_seconds ({config.run_budget_seconds}s); stopping "
+                         f"with {len(pending)} unfinished task(s) — see 'autobuild status'")
+                    return "run_budget_seconds"
                 warn(f"hit max_iterations ({config.max_iterations}); stopping with "
                      f"{len(pending)} unfinished task(s) — see 'autobuild status'")
                 return "max_iterations"
