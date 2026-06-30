@@ -25,7 +25,7 @@ from shutil import which
 
 from .config import Config
 from .paths import Paths
-from .retries import clear_retries, record_timeout
+from .retries import clear_retries, record_timeout, retry_count
 from .scheduler import backlog_lock, claim_tasks, runnable_tasks, stuck_tasks
 from .session import (
     RunningSession,
@@ -909,23 +909,32 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float,
 
     running: list[RunningSession] = []
     try:
-        _supervise(paths, config, running, sleep_seconds=sleep_seconds, monotonic=monotonic)
+        reason = _supervise(paths, config, running, sleep_seconds=sleep_seconds,
+                            monotonic=monotonic)
     except BaseBranchLeak:
         # base is corrupt (a session escaped onto it): stop now and KILL any sessions
         # still running — they'd only burn tokens on a doomed run, and the same leak
-        # check would refuse to integrate them anyway. Then re-raise for the CLI to
-        # report. `running` is mutated in place by _supervise, so it holds the live set.
+        # check would refuse to integrate them anyway. Leave a summary (reason `halted`)
+        # so even an aborted run is legible, then re-raise for the CLI to report.
+        # `running` is mutated in place by _supervise, so it holds the live set.
         for rs in running:
             _kill_group(rs, config.kill_grace_seconds)
+        _finish_run(paths, config, "halted")
         raise
+    _finish_run(paths, config, reason)
     status(paths, config)
 
 
 def _supervise(paths: Paths, config: Config, running: list[RunningSession], *,
-               sleep_seconds: float, monotonic=time.monotonic) -> None:
+               sleep_seconds: float, monotonic=time.monotonic) -> str:
     """The scheduling loop. Appends spawned sessions to `running` and keeps it in sync
     with the live set IN PLACE (`running[:] = ...`) so a caller catching BaseBranchLeak
-    can still see — and kill — what was running when the halt fired."""
+    can still see — and kill — what was running when the halt fired.
+
+    Returns the terminal reason the run ended for — `drained` (backlog empty),
+    `settled` (only blocked/unsatisfiable work left), or `max_iterations` (budget
+    spent with work unstarted) — so the caller records it in the run summary instead
+    of re-deriving it. (The `halted` reason is supplied by the BaseBranchLeak handler.)"""
     iteration = 0
     # Optional whole-run WALL-CLOCK budget: a monotonic deadline computed ONCE here (not per
     # poll tick — same reasoning as max_iterations below: a long fleet of poll ticks must not
@@ -979,15 +988,18 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession], *,
                 # claiming a clean drain. In-flight sessions were drained above, so the only
                 # thing unfinished is work we declined to start. Name WHICH cap tripped so a
                 # human knows what to raise — the wall-clock budget takes precedence (it's the
-                # hard real-time wall; raise run_budget_seconds), else the iteration cap.
+                # hard real-time wall; raise run_budget_seconds), else the iteration cap — and
+                # return that reason so the run summary records which cap ended the run.
                 if over_time:
                     warn(f"hit run_budget_seconds ({config.run_budget_seconds}s); stopping "
                          f"with {len(pending)} unfinished task(s) — see 'autobuild status'")
-                else:
-                    warn(f"hit max_iterations ({config.max_iterations}); stopping with "
-                         f"{len(pending)} unfinished task(s) — see 'autobuild status'")
+                    return "run_budget_seconds"
+                warn(f"hit max_iterations ({config.max_iterations}); stopping with "
+                     f"{len(pending)} unfinished task(s) — see 'autobuild status'")
+                return "max_iterations"
             elif not pending:
                 ok("backlog drained — COMPLETE")
+                return "drained"
             else:
                 stuck = stuck_tasks(tasks, index)
                 if stuck:
@@ -1000,7 +1012,7 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession], *,
                 else:
                     warn(f"backlog settled with {len(pending)} unfinished task(s) "
                          f"— see 'autobuild status'")
-            break
+                return "settled"
 
         if not claimed:
             # No new work to start this pass (at capacity, or nothing runnable yet).
@@ -1069,6 +1081,159 @@ def status(paths: Paths, config: Config) -> dict:
         print(f"    {b}")
     print()
     return report
+
+
+# --- run summary -------------------------------------------------------------
+
+def _parse_iso(ts: object) -> datetime | None:
+    """Parse an autobuild timestamp (`_now()`'s `%Y-%m-%dT%H:%M:%SZ`, UTC) back to an
+    aware datetime, or None for anything unparseable — so a torn/missing timestamp
+    just drops the duration rather than crashing the summary."""
+    if not isinstance(ts, str):
+        return None
+    try:
+        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _duration_seconds(started: object, reaped_at: object) -> float | None:
+    """Best-effort wall-time between a session's `started` (meta.json) and `reaped_at`
+    (reaped.json). None when either timestamp is missing/unparseable or the clock ran
+    backwards — we omit a duration we can't trust rather than guess one."""
+    a, b = _parse_iso(started), _parse_iso(reaped_at)
+    if a is None or b is None:
+        return None
+    secs = (b - a).total_seconds()
+    return secs if secs >= 0 else None
+
+
+def _session_outcomes(paths: Paths) -> dict[str, dict]:
+    """Map task-id -> its latest session's integration outcome, harvested from the
+    per-session forensics (`meta.json` + `reaped.json`, or `leak.json` when the session
+    halted the run before it could be reaped). A task with several sessions (timeout
+    retries / re-runs) reports its most recent one; sessions sort chronologically by id,
+    so a later entry overwrites an earlier. Sessions with neither a reaped.json nor a
+    leak.json contribute nothing — they have no terminal outcome yet."""
+    outcomes: dict[str, dict] = {}
+    if not paths.sessions_dir.is_dir():
+        return outcomes
+    for sdir in sorted(paths.sessions_dir.iterdir()):
+        if not sdir.is_dir():
+            continue
+        meta = _read_json(sdir / "meta.json") or {}
+        reaped = _read_json(sdir / "reaped.json")
+        if reaped is not None:
+            tid = str(meta.get("task", "")) or str(reaped.get("task", ""))
+            outcome = {
+                "session": sdir.name,
+                "result": reaped.get("status"),
+                "integrated": bool(reaped.get("integrated", False)),
+                "checks": reaped.get("checks", "n/a"),
+                "requeued": bool(reaped.get("requeued", False)),
+                "followups": list(reaped.get("followups") or []),
+            }
+            leak = reaped.get("leak")
+            if leak:
+                outcome["leak"] = list(leak)
+            duration = _duration_seconds(meta.get("started"), reaped.get("reaped_at"))
+        else:
+            # The auto-merge base-leak halt blocks the task and writes leak.json but —
+            # deliberately — NO reaped.json (so a re-run keeps flagging the corrupt base).
+            # Surface that session's outcome from leak.json so a halted run is still legible.
+            leak = _read_json(sdir / "leak.json")
+            if leak is None:
+                continue  # no terminal outcome yet — skip
+            tid = str(meta.get("task", "")) or str(leak.get("task", ""))
+            outcome = {
+                "session": sdir.name,
+                "result": None,
+                "integrated": False,
+                "checks": "n/a",
+                "requeued": False,
+                "followups": [],
+                "leak": list(leak.get("commits") or []),
+            }
+            duration = _duration_seconds(meta.get("started"), leak.get("detected_at"))
+        if not tid:
+            continue
+        if duration is not None:
+            outcome["duration_seconds"] = duration
+        outcomes[tid] = outcome
+    return outcomes
+
+
+def write_run_summary(paths: Paths, config: Config, reason: str) -> dict:
+    """Build and atomically write `.autobuild/run-summary.json` — the end-of-run digest of
+    what the run did. Reuses `collect_status` for counts/tasks/stuck and layers each task's
+    per-session integration outcome (from reaped.json), follow-ups filed, timeout-retry
+    attempts (from the retries ledger), and best-effort wall-time on top. Returns the plain
+    dict it wrote (also the message body the notifications hook formats)."""
+    report = collect_status(paths)
+    outcomes = _session_outcomes(paths)
+    rows = []
+    for t in report["tasks"]:
+        out = outcomes.get(t.id)
+        row = {
+            "id": t.id,
+            "status": t.status,
+            "attempts": retry_count(paths.retries_ledger, t.id),
+            "integration": out,
+            "followups": list(out["followups"]) if out else [],
+        }
+        rows.append(row)
+    summary = {
+        "generated_at": _now(),
+        "reason": reason,
+        "counts": report["counts"],
+        "tasks": rows,
+        "stuck": report["stuck"],
+    }
+    _atomic_write_json(paths.run_summary, summary)
+    return summary
+
+
+def _print_run_digest(summary: dict) -> None:
+    """Print the short at-a-glance digest (the JSON is the complete record). One line for
+    the reason, one for the counts, and one per blocked/timed-out task with its reason."""
+    log(f"run ended: {summary['reason']}")
+    counts = summary["counts"]
+    if counts:
+        log("  " + "  ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+    stuck = {s["task"]: s["reason"] for s in summary["stuck"]}
+    for row in summary["tasks"]:
+        if row["status"] not in ("blocked", "timeout"):
+            continue
+        warn(f"  {row['id']} {row['status']}: {_task_digest_reason(row, stuck)}")
+
+
+def _task_digest_reason(row: dict, stuck: dict[str, str]) -> str:
+    """A one-line 'why' for a blocked/timed-out task in the digest: prefer the
+    integration forensics (leak / failed checks / reported result), then fall back to
+    the stuck-dependency reason, then the bare status."""
+    bits: list[str] = []
+    integ = row.get("integration")
+    if integ:
+        if integ.get("leak"):
+            bits.append("base-leak")
+        elif str(integ.get("checks", "")).startswith("failed"):
+            bits.append(str(integ["checks"]))
+        elif integ.get("result"):
+            bits.append(str(integ["result"]))
+    if row["id"] in stuck:
+        bits.append(stuck[row["id"]])
+    return "; ".join(bits) or row["status"]
+
+
+def _finish_run(paths: Paths, config: Config, reason: str) -> None:
+    """Write the run summary and print its digest — best-effort. A failure here must never
+    mask the run's real outcome (or a re-raised BaseBranchLeak halt), so any error is
+    warned and swallowed rather than propagated."""
+    try:
+        summary = write_run_summary(paths, config, reason)
+        _print_run_digest(summary)
+    except Exception as exc:  # noqa: BLE001 — summary is advisory; never let it break a run
+        warn(f"could not write run summary: {exc}")
 
 
 # --- clean -------------------------------------------------------------------

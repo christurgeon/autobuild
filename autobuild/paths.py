@@ -44,6 +44,10 @@ class Paths:
         return self.ab_dir / "retries.json"
 
     @property
+    def run_summary(self) -> Path:
+        return self.ab_dir / "run-summary.json"
+
+    @property
     def config_file(self) -> Path:
         return self.ab_dir / "config.yml"
 
