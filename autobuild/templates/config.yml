@@ -76,3 +76,20 @@ kill_grace_seconds: 20        # integer >= 1 (no 0-grace): SIGTERM -> wait -> SI
 timeout_max_retries: 2        # integer >= 0: auto-retries for a timed-out task before it's
                               # left terminal `timeout` (0 = block on the first timeout).
                               # Each retry re-spends task_timeout_seconds above.
+
+# --- operator notifications --------------------------------------------------
+# Generic, mechanism-agnostic hook: autobuild runs this shell command on the COARSE
+# run-level events worth knowing about while you're away. "" (the default) disables it.
+# The event type and message are passed as environment variables:
+#   AUTOBUILD_EVENT    one of: done | halt | needs_human
+#   AUTOBUILD_MESSAGE  a short human-readable summary of the event
+# Events (low-volume by design — run-level + NEEDS_HUMAN, never per-task-success):
+#   done         the run ended (drained / settled / max_iterations); message has the counts
+#   halt         a session escaped onto base_branch and the run HALTED (auto-merge)
+#   needs_human  a session reported NEEDS_HUMAN (names the task)
+# It is best-effort: bounded by a timeout and ALL failures are swallowed (warned), so a
+# broken notifier never breaks a run. The command is a shell you control, NOT a security
+# boundary. Example (Telegram via curl):
+#   notify_command: 'curl -s -X POST "https://api.telegram.org/bot$TOKEN/sendMessage"
+#     --data-urlencode "chat_id=$CHAT" --data-urlencode "text=[$AUTOBUILD_EVENT] $AUTOBUILD_MESSAGE"'
+notify_command: ""            # string; "" = notifications disabled

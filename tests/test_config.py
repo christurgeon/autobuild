@@ -76,6 +76,28 @@ def test_verify_after_merge_non_bool_raises(tmp_path):
     assert any("verify_after_merge" in p for p in e.value.problems)
 
 
+def test_notify_command_defaults_empty(tmp_path):
+    assert Config().notify_command == ""              # disabled by default
+    assert load_config(tmp_path / "nope.yml").notify_command == ""
+
+
+def test_notify_command_accepts_string(tmp_path):
+    cfg = load_config(_write(tmp_path, "notify_command: 'echo hi'\n"))
+    assert cfg.notify_command == "echo hi"
+
+
+def test_notify_command_empty_string_is_valid(tmp_path):
+    # Unlike most strings, "" is meaningful (disabled) and must NOT be a validation error.
+    cfg = load_config(_write(tmp_path, 'notify_command: ""\n'))
+    assert cfg.notify_command == ""
+
+
+def test_notify_command_non_string_raises(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, "notify_command: 42\n"))
+    assert any("notify_command" in p for p in e.value.problems)
+
+
 def test_checks_block_list_keeps_inner_quotes(tmp_path):
     p = tmp_path / "config.yml"
     p.write_text(TEMPLATE_CONFIG)
