@@ -31,39 +31,38 @@ point the user at the **autobuild-author-goal** skill first.
      leave it, or the scheduler will run a meaningless task.
    - **If real, human-authored tasks already exist,** leave them and continue the sequence
      from the highest existing `id`; never reuse an id.
-4. **Draft the backlog.** Each task is **one session of work**: small enough to finish in
-   a single fresh session, large enough to be worth a commit. For each task produce:
+4. **Draft the backlog.** Each task is one session of work: small enough to finish in a
+   single fresh session, large enough to be worth a commit. For each task produce:
    - `id` (`task-NNN`, sequential), `title`, `priority` (lower = higher), `depends_on`
-     (only *real* prerequisites — keep the graph a DAG).
+     (only real prerequisites — keep the graph a DAG).
    - **Goal** — the single self-contained piece of work.
-   - **Acceptance criteria** — concrete and checkable, and always include a line for the
-     project's **configured checks** (read them from `.autobuild/config.yml`, e.g.
-     "`ruff check .` and `pytest` pass" — use the real commands, not the literal words
-     "typecheck/lint/test"). If `config.yml` still has the seeded placeholder
-     `echo 'replace me…'` check, fall back to the commands named in `GOAL.md` / CI /
-     README, and suggest the user run **autobuild-configure** to make them real.
+   - **Acceptance criteria** — concrete and checkable, always including a line for the
+     project's configured checks (read them from `.autobuild/config.yml`, e.g. "`ruff check
+     .` and `pytest` pass" — the real commands, not the words "typecheck/lint/test"). If
+     `config.yml` still has the seeded `echo 'replace me…'` placeholder, fall back to the
+     commands named in `GOAL.md` / CI / README and suggest the user run **autobuild-configure**
+     to make them real.
    - **Notes** — context, gotchas, links.
-   - **Sizing rule of thumb:** roughly **one module or one endpoint per task**. If a task
-     would touch 3+ unrelated areas, or needs two distinct test suites, split it. Assign a
-     **cross-cutting criterion** (e.g. an end-to-end test spanning several pieces) to a
-     single owning task that `depends_on` all the pieces it exercises.
-   - **Let scale drive the backlog.** Size the work to `GOAL.md`'s scale envelope.
-     Small/simple scale → do **not** create infrastructure tasks (caching, queues, sharding,
-     autoscaling) the goal doesn't call for; prefer the simplest thing that meets the DoD.
-     Larger scale → make sure load/performance, observability, and capacity each have an
-     owning task. Don't invent scaling work the envelope doesn't justify, and don't omit it
-     when the envelope demands it.
-5. **Self-lint before writing** (the folded-in backlog check). Verify and fix:
-   - no dependency **cycles**; every `depends_on` id **exists**;
-   - no task obviously **too big** for one session (split it) or **untestable** (vague
-     criteria → make them concrete);
+   - **Sizing** — roughly one module or one endpoint per task. If a task would touch 3+
+     unrelated areas, or needs two distinct test suites, split it. Assign a cross-cutting
+     criterion (e.g. an end-to-end test spanning several pieces) to a single owning task
+     that `depends_on` all the pieces it exercises.
+   - **Scale fit** — size the work to `GOAL.md`'s envelope. Small/simple scale → don't
+     create infrastructure tasks (caching, queues, sharding, autoscaling) the goal doesn't
+     call for; prefer the simplest thing that meets the DoD. Larger scale → give
+     load/performance, observability, and capacity each an owning task. Don't invent scaling
+     work the envelope doesn't justify, and don't omit it when the envelope demands it.
+5. **Self-lint before writing.** Verify and fix:
+   - no dependency cycles; every `depends_on` id exists;
+   - no task obviously too big for one session (split it) or untestable (vague criteria →
+     make them concrete);
    - priorities are sane and the ordering matches the dependency graph;
    - **coverage** — every Definition-of-Done bullet in `GOAL.md` is satisfied by at least
-     one task, and no task falls outside the goal. This is the check that tells you the
-     backlog actually *achieves* the goal.
-   - **scale fit** — no task over- or under-builds relative to `GOAL.md`'s scale envelope:
-     no gold-plated infra the magnitude doesn't justify, and no missing capacity/perf work
-     the magnitude demands.
+     one task, and no task falls outside the goal. This is what tells you the backlog
+     actually achieves the goal.
+   - **scale fit** — no task over- or under-builds relative to the scale envelope: no
+     gold-plated infra the magnitude doesn't justify, no missing capacity/perf work it
+     demands.
    Report what you found and fixed.
 6. **Present, then write.** Show the proposed backlog as a compact list — `id · title ·
    depends_on · one-line goal` — and get approval (if non-interactive, write it and flag
