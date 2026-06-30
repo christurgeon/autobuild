@@ -445,6 +445,47 @@ def test_run_budget_seconds_bool_raises(tmp_path):
     assert "run_budget_seconds" in str(e.value)
 
 
+# --- whole-run cost budget: run_budget_usd (float, min 0, default 0.0 = off) ---
+
+def test_run_budget_usd_defaults_to_zero(tmp_path):
+    assert load_config(tmp_path / "nope.yml").run_budget_usd == 0.0
+
+
+def test_run_budget_usd_accepts_float(tmp_path):
+    cfg = load_config(_write(tmp_path, "run_budget_usd: 2.50\n"))
+    assert cfg.run_budget_usd == 2.5
+    assert isinstance(cfg.run_budget_usd, float)
+
+
+def test_run_budget_usd_accepts_int_as_float(tmp_path):
+    cfg = load_config(_write(tmp_path, "run_budget_usd: 5\n"))
+    assert cfg.run_budget_usd == 5.0
+    assert isinstance(cfg.run_budget_usd, float)
+
+
+def test_run_budget_usd_zero_is_allowed(tmp_path):
+    assert load_config(_write(tmp_path, "run_budget_usd: 0\n")).run_budget_usd == 0.0
+
+
+def test_run_budget_usd_negative_raises(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, "run_budget_usd: -1.0\n"))
+    assert "run_budget_usd" in str(e.value)
+
+
+def test_run_budget_usd_bool_raises(tmp_path):
+    # bool is an int subclass; must be rejected like the numeric knobs
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, "run_budget_usd: true\n"))
+    assert "run_budget_usd" in str(e.value)
+
+
+def test_run_budget_usd_string_raises(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, "run_budget_usd: lots\n"))
+    assert "run_budget_usd" in str(e.value)
+
+
 def test_config_error_names_path(tmp_path):
     p = _write(tmp_path, "integration: nope\n")
     with pytest.raises(ConfigError) as e:
