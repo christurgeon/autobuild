@@ -25,6 +25,7 @@ from shutil import which
 
 from .config import Config
 from .paths import Paths
+from .progress import read_progress
 from .retries import clear_retries, record_timeout, retry_count
 from .scheduler import backlog_lock, claim_tasks, runnable_tasks, stuck_tasks
 from .session import (
@@ -1158,7 +1159,19 @@ def collect_status(paths: Paths) -> dict:
             state = result.get("status") if result else "pending"
             if (sdir / "reaped.json").exists():
                 state = f"{state} (reaped)"
-            sessions.append({"session": sdir.name, "state": state})
+            # Live per-session progress (issue #40), parsed from the stream-json session.out:
+            # the assistant-message count and the final result event's cost. Idle time comes
+            # free from the file's mtime (its last write = the agent's last activity); None
+            # when the session hasn't emitted anything yet.
+            out_file = sdir / "session.out"
+            prog = read_progress(out_file)
+            try:
+                idle = max(0.0, time.time() - out_file.stat().st_mtime)
+            except OSError:
+                idle = None
+            sessions.append({"session": sdir.name, "state": state,
+                             "messages": prog.messages, "cost_usd": prog.cost_usd,
+                             "idle_seconds": idle})
 
     wt = _git(paths.root, "worktree", "list")
     worktrees = [ln for ln in wt.stdout.splitlines() if "/.autobuild/worktrees/" in ln]
@@ -1188,7 +1201,13 @@ def status(paths: Paths, config: Config) -> dict:
 
     print(f"\n{_c('1;37')}SESSIONS{_c('0')}")
     for s in report["sessions"]:
-        print(f"  {s['session']:<34} {s['state']}")
+        bits = f"msgs={s['messages']}"
+        if s.get("cost_usd") is not None:
+            bits += f"  cost=${s['cost_usd']:.4f}"
+        # idle is only meaningful for a still-live session; a reaped one isn't "idle".
+        if s.get("idle_seconds") is not None and "(reaped)" not in s["state"]:
+            bits += f"  idle={s['idle_seconds']:.0f}s"
+        print(f"  {s['session']:<34} {s['state']:<18} {bits}")
     if not report["sessions"]:
         print("  (none)")
 

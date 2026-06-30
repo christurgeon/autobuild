@@ -1504,6 +1504,32 @@ def test_collect_status_tolerates_non_dict_result(git_repo):
     assert any(s["session"] == "sess-x" for s in report["sessions"])
 
 
+def test_collect_status_includes_session_progress(git_repo):
+    """Issue #40: each session entry carries live progress parsed from session.out —
+    assistant-message count and the result event's cost — plus idle time from the file."""
+    paths = setup(git_repo)
+    sdir = paths.sessions_dir / "sess-x"
+    sdir.mkdir(parents=True)
+    (sdir / "session.out").write_text(
+        '{"type":"assistant","message":{"model":"m","content":[]}}\n'
+        '{"type":"result","subtype":"success","total_cost_usd":0.25,'
+        '"usage":{"input_tokens":1,"output_tokens":2}}\n', encoding="utf-8")
+    report = collect_status(paths)
+    s = next(s for s in report["sessions"] if s["session"] == "sess-x")
+    assert s["messages"] == 1
+    assert abs(s["cost_usd"] - 0.25) < 1e-9
+    assert s["idle_seconds"] is not None and s["idle_seconds"] >= 0.0
+
+
+def test_collect_status_progress_zero_when_no_session_out(git_repo):
+    paths = setup(git_repo)
+    sdir = paths.sessions_dir / "sess-y"
+    sdir.mkdir(parents=True)
+    (sdir / "result.json").write_text('{"task":"t","status":"COMPLETE"}')
+    s = next(s for s in collect_status(paths)["sessions"] if s["session"] == "sess-y")
+    assert s["messages"] == 0 and s["cost_usd"] is None and s["idle_seconds"] is None
+
+
 def test_run_survives_poisoned_sentinel(git_repo, stub_bin):
     """A non-dict result.json must not crash run() at startup (reconcile -> reap_all)."""
     stub_bin()  # claude on PATH so the run's critical preflight passes
