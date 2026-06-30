@@ -201,8 +201,9 @@ def run_lock(lock_file: Path):
     """Hold the project's exclusive run lock for the duration of the with-block.
 
     A single `run` owns the lock for its whole lifetime; this is what lets
-    `reconcile()` safely BLOCK orphaned in-progress sessions (the lock proves no
-    other process is driving them). Acquisition is non-blocking: if another holder
+    `reconcile()` safely recover orphaned in-progress sessions — re-queue them as a
+    synthetic TIMEOUT, or block them — since the lock proves no other process is
+    driving them. Acquisition is non-blocking: if another holder
     has it, raise RunLockHeld immediately rather than waiting. The lock is an
     fcntl.flock, so the kernel releases it automatically if the holder dies — the
     exact crash semantic we want, with no stale-PID games."""
@@ -755,14 +756,15 @@ def reconcile(paths: Paths, *, sweep_in_progress: bool = False) -> None:
     """Restore resume-ability after a `run` crash. Orphaned `claimed` tasks (claim
     succeeded, spawn never finished) go back to `todo`.
 
-    The orphaned `in-progress` -> BLOCKED sweep is gated on `sweep_in_progress`,
+    The orphaned `in-progress` recovery sweep is gated on `sweep_in_progress`,
     which the caller sets only when it holds the run lock. Without the lock we
     cannot tell a genuinely orphaned session from one a *concurrent* live run is
     actively driving (its child process is invisible to us), so a reap that runs
-    alongside a run must NOT sweep — doing so would BLOCK live sessions and remove
-    their worktrees out from under the run. A fresh `run` (or a `reap` that can
-    take the lock) holds it, proving no other process owns these sessions, and
-    sweeps as before."""
+    alongside a run must NOT sweep — doing so would kill and re-queue live sessions
+    and remove their worktrees out from under the run. A fresh `run` (or a `reap`
+    that can take the lock) holds it, proving no other process owns these sessions.
+    Each orphan is recovered like a deadline kill: a synthetic TIMEOUT sentinel the
+    reaper re-queues (or terminal-`timeout`s once the retry budget is spent)."""
     for t in iter_tasks(paths.tasks_dir):
         if t.status == "claimed":
             set_status(t.path, "todo")
@@ -914,7 +916,8 @@ def run(paths: Paths, config: Config, *, sleep_seconds: float = 2.0,
     """Drive the outer loop until the backlog drains. Holds the run lock for the
     whole lifetime: a second `run` is refused (RunLockHeld) and a `reap` running
     alongside this one cannot reconcile the sessions this run owns. Because we hold
-    the lock, the startup reconcile is free to BLOCK genuinely orphaned sessions.
+    the lock, the startup reconcile is free to recover genuinely orphaned sessions
+    (re-queue them as a synthetic TIMEOUT, or block them).
 
     `monotonic` is the wall-clock source for the optional run budget; injectable so
     tests can jump past the deadline without sleeping (mirrors `sleep_seconds`)."""

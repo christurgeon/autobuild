@@ -153,8 +153,9 @@ def write_sentinel_if_absent(sdir: Path, tid: str, status: str, summary: str,
     atomically. Returns True if written, False if refused.
 
     Every HARNESS-authored sentinel (worktree-creation BLOCK, exited-without-result
-    BLOCK, orphan BLOCK, a missing-CLI NEEDS_HUMAN) goes through this, so a late-arriving
-    real agent result — or a re-run over an already-reaped session — is never clobbered."""
+    BLOCK, orphan-recovery TIMEOUT, a missing-CLI NEEDS_HUMAN) goes through this, so a
+    late-arriving real agent result — or a re-run over an already-reaped session — is
+    never clobbered."""
     if (sdir / "reaped.json").exists():
         return False
     if _result_is_parseable(sdir):

@@ -184,9 +184,11 @@ This is the part that requires reading multiple files to understand:
    written during the grace window, which is re-classified and still wins; a process that exits
    with no usable sentinel — absent, or present but unparseable (`_classify_sentinel`) — is given
    a synthetic `BLOCKED`. At startup `reconcile` (only while it holds the run lock) returns
-   orphaned `claimed` tasks to `todo` and `BLOCKED`s orphaned `in-progress` sessions (deadlines
-   are in-memory, so a crashed run's orphans become `BLOCKED`, not `timeout`), so a killed `run`
-   resumes cleanly from files alone (no PID file needed).
+   orphaned `claimed` tasks to `todo` and recovers orphaned `in-progress` sessions by writing a
+   synthetic `TIMEOUT` (a crash leaves the same killed-before-result state a deadline does), so
+   the reaper re-queues them — re-forking from base, bounded by `timeout_max_retries` — or leaves
+   them terminal `timeout` once the budget is spent. A killed `run` therefore self-heals from
+   files alone (no PID file needed) instead of stranding orphans for a human to reset.
 
 The loop terminates when nothing is running **and** nothing is runnable (backlog drained, or
 settled behind blocked/unsatisfiable deps), or when `max_iterations` trips. When a pass makes no
@@ -223,16 +225,18 @@ settle check yields back to claiming when `runnable_tasks` is non-empty rather t
 - **`run` is single-supervisor.** It holds a separate `fcntl.flock` on `.autobuild/run.lock` for
   its whole lifetime; a second `autobuild run` is refused (`RunLockHeld`, non-zero exit) rather
   than fighting over the same sessions. `reap` is lock-aware — it only performs the dangerous
-  in-progress→`BLOCKED` reconcile sweep when it can take the lock (i.e. no live `run`).
+  in-progress recovery reconcile sweep (which re-queues orphans as a synthetic `TIMEOUT`) when it
+  can take the lock (i.e. no live `run`).
 - **Status writes are surgical and atomic.** `set_status` rewrites only the `status:` line via
   regex + `os.replace`; never round-trip a human task file through `yaml.dump` (it would strip
   comments and reorder keys). Follow-up task files are generated, so those *are* serialized with
   `yaml.safe_dump`.
 - **Per-session timeouts are monotonic and in-memory.** A session's deadline lives only on its
   `RunningSession` (`time.monotonic()`-based) and is enforced solely by the live supervisor's
-  `_harvest`; a killed `run` does not resume deadlines — its orphans are caught by `reconcile` as
-  `BLOCKED`, not `timeout`. The child runs in its own process group so `_kill_group` can signal
-  the whole agent subtree (`os.killpg`); the `pgid` is persisted to `meta.json`.
+  `_harvest`; a killed `run` does not resume in-memory deadlines, but `reconcile` still recovers
+  its orphans by re-queueing them as a synthetic `TIMEOUT` — so a crash self-heals like a deadline
+  kill rather than stranding work. The child runs in its own process group so `_kill_group` can
+  signal the whole agent subtree (`os.killpg`); the `pgid` is persisted to `meta.json`.
 - Naming: CLI subcommands map to `run` / `status` / `reap` / `clean` in `loop.py` (plus
   `ab_init` in `cli.py`); module-internal helpers are prefixed `_`.
 - Minimal dependencies by design: **PyYAML** is the only runtime dep; everything else (process
