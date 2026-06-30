@@ -565,23 +565,110 @@ def test_reconcile_resets_orphaned_claimed_to_todo(git_repo):
     assert read_task(paths.tasks_dir / "task-001.md").status == "todo"
 
 
-def test_reconcile_blocks_orphaned_in_progress_when_sweeping(git_repo):
+def test_reconcile_requeues_orphaned_in_progress_as_timeout(git_repo, git):
+    """A crash/env-kill leaves a session in the SAME state a deadline kill does — killed
+    before it could write result.json. reconcile recovers it like a timeout: a synthetic
+    TIMEOUT sentinel the reaper re-queues (re-forking from base), not a terminal BLOCKED a
+    human must reset by hand (issue #38)."""
     paths = setup(git_repo)
     add_task(paths, "task-001", status="in-progress")
+    # a real orphaned worktree + autobuild/task-001 branch, as spawn_session leaves one
+    make_worktree(paths, "sess-task-001", "task-001", "main")
+    sdir = paths.sessions_dir / "sess-task-001"
+    sdir.mkdir(parents=True, exist_ok=True)
+    (sdir / "meta.json").write_text(json.dumps(
+        {"task": "task-001", "branch": "autobuild/task-001",
+         "worktree": str(paths.worktrees_dir / "sess-task-001")}))
+
+    reconcile(paths, sweep_in_progress=True)
+    # recovered as a synthetic TIMEOUT sentinel, not a terminal BLOCKED
+    assert json.loads((sdir / "result.json").read_text())["status"] == "TIMEOUT"
+
+    # the reaper re-queues it and force-deletes the partial branch so the retry re-forks
+    reap_all(Config(integration="branch"), paths)
+    assert read_task(paths.tasks_dir / "task-001.md").status == "todo"
+    assert retry_count(paths.retries_ledger, "task-001") == 1
+    assert git(git_repo, "rev-parse", "--verify", "--quiet",
+               "refs/heads/autobuild/task-001", check=False).returncode != 0
+
+
+def test_reconcile_orphan_timeout_exhaustion_is_terminal(git_repo):
+    """Crash re-queues share the timeout budget: once timeout_max_retries (default 2)
+    distinct sessions are spent, an orphan lands terminal `timeout`, not an endless
+    re-queue. The ledger is cleared so a later manual re-open starts fresh (issue #38)."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    # burn the budget: two prior attempts already recorded for this task
+    record_timeout(paths.retries_ledger, "task-001", "old-attempt-1")
+    record_timeout(paths.retries_ledger, "task-001", "old-attempt-2")
+    sdir = paths.sessions_dir / "sess-task-001-crash"
+    sdir.mkdir(parents=True)
+    (sdir / "meta.json").write_text(json.dumps(
+        {"task": "task-001", "branch": "autobuild/task-001"}))
+
+    reconcile(paths, sweep_in_progress=True)
+    assert json.loads((sdir / "result.json").read_text())["status"] == "TIMEOUT"
+    reap_all(Config(integration="branch"), paths)  # default timeout_max_retries=2
+    # this orphan is the 3rd distinct attempt: 3 > 2 -> terminal timeout, ledger cleared
+    assert read_task(paths.tasks_dir / "task-001.md").status == "timeout"
+    assert retry_count(paths.retries_ledger, "task-001") == 0
+
+
+def test_reconcile_orphan_that_escaped_onto_base_is_blocked_not_requeued(git_repo, git):
+    """The load-bearing safety net: recovering an orphan as TIMEOUT must NOT bypass the
+    worktree-escape check. base_leak_commits runs first in _reap_session_locked (before the
+    status dispatch), so an orphan that committed straight onto base is blocked with a
+    leak.json and never re-queued — even though reconcile labelled it TIMEOUT (issue #38)."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    base_sha = git(git_repo, "rev-parse", "HEAD").stdout.strip()
+    # simulate a worktree escape: a non-merge commit straight onto base since spawn
+    (git_repo / "escaped.txt").write_text("oops")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-q", "-m", "escaped onto base")
     sdir = paths.sessions_dir / "sess-task-001"
     sdir.mkdir(parents=True)
-    (sdir / "meta.json").write_text(json.dumps({"task": "task-001", "branch": "autobuild/task-001"}))
+    (sdir / "meta.json").write_text(json.dumps(
+        {"task": "task-001", "branch": "autobuild/task-001",
+         "base_branch": "main", "base_sha": base_sha}))
+
     reconcile(paths, sweep_in_progress=True)
-    # an orphaned in-progress session gets a BLOCKED sentinel...
-    result = json.loads((sdir / "result.json").read_text())
-    assert result["status"] == "BLOCKED"
-    # ...which the reaper then turns into a blocked task
+    assert json.loads((sdir / "result.json").read_text())["status"] == "TIMEOUT"
+    # branch mode: the leak blocks just this task (no halt), writes leak.json, never re-queues
     reap_all(Config(integration="branch"), paths)
     assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+    assert (sdir / "leak.json").exists()
+    assert retry_count(paths.retries_ledger, "task-001") == 0
+
+
+def test_reconcile_orphan_escaped_onto_base_halts_under_auto_merge(git_repo, git):
+    """The most consequential halt path, made explicit: under auto-merge a reconciled
+    orphan that escaped onto base must HALT the run (raise BaseBranchLeak) rather than
+    re-queue onto a corrupted base — the leak check is status-agnostic, so labelling the
+    orphan TIMEOUT does not let the escape through (issue #38)."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    base_sha = git(git_repo, "rev-parse", "HEAD").stdout.strip()
+    (git_repo / "escaped.txt").write_text("oops")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-q", "-m", "escaped onto base")
+    sdir = paths.sessions_dir / "sess-task-001"
+    sdir.mkdir(parents=True)
+    (sdir / "meta.json").write_text(json.dumps(
+        {"task": "task-001", "branch": "autobuild/task-001",
+         "base_branch": "main", "base_sha": base_sha}))
+
+    reconcile(paths, sweep_in_progress=True)
+    with pytest.raises(loop_mod.BaseBranchLeak):
+        reap_all(Config(integration="auto-merge"), paths)
+    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+    assert (sdir / "leak.json").exists()
+    assert not (sdir / "reaped.json").exists()   # un-reaped: re-runs keep flagging
+    assert retry_count(paths.retries_ledger, "task-001") == 0
 
 
 def test_reconcile_spares_in_progress_without_sweep(git_repo):
-    """The dangerous in-progress -> BLOCKED sweep is gated: a reconcile that does
+    """The dangerous in-progress recovery sweep is gated: a reconcile that does
     not own the run lock (sweep_in_progress=False) must leave in-progress alone."""
     paths = setup(git_repo)
     add_task(paths, "task-001", status="in-progress")
@@ -660,28 +747,32 @@ def test_reap_alongside_run_leaves_live_session_process_and_worktree(git_repo):
 
 
 def test_fresh_run_reconciles_orphaned_in_progress_after_crash(git_repo, stub_bin):
-    """After a run is killed (lock auto-released), a fresh run takes the lock and
-    reconciles orphaned in-progress sessions to blocked — crash recovery works."""
-    stub_bin()  # claude on PATH so the run's critical preflight passes
+    """After a run is killed (lock auto-released), a fresh run takes the lock, recovers the
+    orphaned in-progress session as a synthetic TIMEOUT, re-queues it, and drives it to
+    completion in the same run — crash recovery self-heals end-to-end (issue #38)."""
+    stub_bin()  # claude on PATH; the re-queued task runs to COMPLETE
     paths = setup(git_repo)
     add_task(paths, "task-001", status="in-progress")
     sdir = paths.sessions_dir / "sess-orphan"
     sdir.mkdir(parents=True)
     (sdir / "meta.json").write_text(json.dumps({"task": "task-001", "branch": "autobuild/task-001"}))
     loop_mod.run(paths, Config(integration="branch"), sleep_seconds=0)
-    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+    # re-queued -> re-claimed -> fresh stub session COMPLETE -> branch-mode integrate -> done
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"
 
 
 def test_reap_without_active_run_recovers_orphaned_in_progress(git_repo):
-    """When no run is active, reap can take the lock and perform the same
-    crash-recovery sweep a fresh run would."""
+    """When no run is active, reap takes the lock and performs the same crash-recovery
+    sweep a fresh run would — re-queuing the orphan to `todo` (issue #38). reap does not
+    spawn, so the task is left runnable for the next run rather than driven to done."""
     paths = setup(git_repo)
     add_task(paths, "task-001", status="in-progress")
     sdir = paths.sessions_dir / "sess-orphan"
     sdir.mkdir(parents=True)
     (sdir / "meta.json").write_text(json.dumps({"task": "task-001", "branch": "autobuild/task-001"}))
     loop_mod.reap(paths, Config(integration="branch"))
-    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+    assert read_task(paths.tasks_dir / "task-001.md").status == "todo"
+    assert retry_count(paths.retries_ledger, "task-001") == 1
 
 
 def test_reap_stalled_blocks_dead_process_without_result(git_repo):
@@ -860,7 +951,10 @@ def test_harvest_reaps_valid_result_even_while_process_alive(git_repo):
 
 
 @pytest.mark.parametrize("shape", sorted(CORRUPT_SENTINELS))
-def test_reconcile_blocks_in_progress_with_corrupt_sentinel(git_repo, shape):
+def test_reconcile_requeues_in_progress_with_corrupt_sentinel(git_repo, shape):
+    """An orphan whose result.json is present-but-unparseable is recovered like any other
+    crash-orphan: a crashed run can't trust the torn write, so it re-queues as TIMEOUT
+    rather than stranding the task (issue #38)."""
     paths = setup(git_repo)
     add_task(paths, "task-001", status="in-progress")
     sdir = paths.sessions_dir / "sess-task-001"
@@ -869,7 +963,8 @@ def test_reconcile_blocks_in_progress_with_corrupt_sentinel(git_repo, shape):
     (sdir / "result.json").write_text(CORRUPT_SENTINELS[shape], encoding="utf-8")
     reconcile(paths, sweep_in_progress=True)
     reap_all(Config(integration="branch"), paths)
-    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+    assert read_task(paths.tasks_dir / "task-001.md").status == "todo"
+    assert retry_count(paths.retries_ledger, "task-001") == 1
 
 
 def test_reconcile_leaves_reapable_sentinel_for_reaper(git_repo):
@@ -944,14 +1039,14 @@ def test_harvest_block_write_is_atomic_no_temp_residue(git_repo):
     assert [p for p in sdir.iterdir() if p.name.endswith(".tmp")] == []
 
 
-def test_reconcile_block_write_is_atomic_no_temp_residue(git_repo):
+def test_reconcile_recover_write_is_atomic_no_temp_residue(git_repo):
     paths = setup(git_repo)
     add_task(paths, "task-001", status="in-progress")
     sdir = paths.sessions_dir / "sess-task-001"
     sdir.mkdir(parents=True)
     (sdir / "meta.json").write_text(json.dumps({"task": "task-001", "branch": "autobuild/task-001"}))
     reconcile(paths, sweep_in_progress=True)
-    assert json.loads((sdir / "result.json").read_text())["status"] == "BLOCKED"
+    assert json.loads((sdir / "result.json").read_text())["status"] == "TIMEOUT"
     assert [p for p in sdir.iterdir() if p.name.endswith(".tmp")] == []
 
 
@@ -1481,7 +1576,7 @@ def _orphan_session(paths, pgid_field):
     return sdir
 
 
-def test_reconcile_kills_orphan_pgid_before_blocking(git_repo, monkeypatch):
+def test_reconcile_kills_orphan_pgid_before_recovering(git_repo, monkeypatch):
     paths = setup(git_repo)
     pgid = os.getpgrp() + 100000                          # >1, not our group, not real
     sdir = _orphan_session(paths, {"pgid": pgid})
@@ -1489,11 +1584,11 @@ def test_reconcile_kills_orphan_pgid_before_blocking(git_repo, monkeypatch):
     monkeypatch.setattr(loop_mod.os, "killpg", lambda p, s: events.append(("kill", p, s)))
     real = loop_mod.write_sentinel_if_absent
     monkeypatch.setattr(loop_mod, "write_sentinel_if_absent",
-                        lambda *a, **k: (events.append(("block",)), real(*a, **k))[1])
+                        lambda *a, **k: (events.append(("recover",)), real(*a, **k))[1])
     reconcile(paths, sweep_in_progress=True)
     assert ("kill", pgid, signal.SIGKILL) in events
-    assert events.index(("kill", pgid, signal.SIGKILL)) < events.index(("block",))  # kill first
-    assert json.loads((sdir / "result.json").read_text())["status"] == "BLOCKED"
+    assert events.index(("kill", pgid, signal.SIGKILL)) < events.index(("recover",))  # kill first
+    assert json.loads((sdir / "result.json").read_text())["status"] == "TIMEOUT"
 
 
 @pytest.mark.parametrize("field", [{}, {"pgid": 0}, {"pgid": 1}, {"pgid": -5}, {"pgid": True}, {"pgid": "OWN"}])
@@ -1507,7 +1602,7 @@ def test_reconcile_never_kills_unsafe_pgid(git_repo, monkeypatch, field):
     monkeypatch.setattr(loop_mod.os, "killpg", lambda p, s: called.append((p, s)))
     reconcile(paths, sweep_in_progress=True)
     assert called == []                                   # never signalled
-    assert json.loads((sdir / "result.json").read_text())["status"] == "BLOCKED"  # still blocked
+    assert json.loads((sdir / "result.json").read_text())["status"] == "TIMEOUT"  # still recovered
 
 
 @pytest.mark.parametrize("exc", [ProcessLookupError, PermissionError])
@@ -1520,7 +1615,7 @@ def test_reconcile_orphan_kill_suppresses_signal_errors(git_repo, monkeypatch, e
 
     monkeypatch.setattr(loop_mod.os, "killpg", boom)
     reconcile(paths, sweep_in_progress=True)              # must not raise / abort the sweep
-    assert json.loads((sdir / "result.json").read_text())["status"] == "BLOCKED"
+    assert json.loads((sdir / "result.json").read_text())["status"] == "TIMEOUT"
 
 
 def test_reconcile_kills_a_real_orphan_group(git_repo):
@@ -1536,7 +1631,7 @@ def test_reconcile_kills_a_real_orphan_group(git_repo):
         reconcile(paths, sweep_in_progress=True)
         proc.wait(timeout=3)
         assert proc.poll() is not None                    # actually killed
-        assert json.loads((sdir / "result.json").read_text())["status"] == "BLOCKED"
+        assert json.loads((sdir / "result.json").read_text())["status"] == "TIMEOUT"
     finally:
         try:
             os.killpg(pgid, signal.SIGKILL)               # fallback cleanup
