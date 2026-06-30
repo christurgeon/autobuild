@@ -486,6 +486,21 @@ def test_run_budget_usd_string_raises(tmp_path):
     assert "run_budget_usd" in str(e.value)
 
 
+def test_run_budget_usd_nan_raises(tmp_path):
+    # YAML resolves .nan to a float; nan >= minimum is False, so without an explicit
+    # finite check it would slip through and SILENTLY DISABLE the cost cap (nan > 0 is
+    # False) — the opposite of what the user asked for. Must be rejected.
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, "run_budget_usd: .nan\n"))
+    assert "run_budget_usd" in str(e.value)
+
+
+def test_run_budget_usd_inf_raises(tmp_path):
+    with pytest.raises(ConfigError) as e:
+        load_config(_write(tmp_path, "run_budget_usd: .inf\n"))
+    assert "run_budget_usd" in str(e.value)
+
+
 def test_config_error_names_path(tmp_path):
     p = _write(tmp_path, "integration: nope\n")
     with pytest.raises(ConfigError) as e:

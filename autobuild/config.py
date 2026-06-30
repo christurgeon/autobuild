@@ -6,6 +6,7 @@ instead of surfacing later inside the loop."""
 
 from __future__ import annotations
 
+import math
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -120,12 +121,19 @@ def load_config(path: Path) -> Config:
 
     def want_float(key: str, default: float, *, minimum: float = 0.0) -> float:
         # Like want_int but accepts a float (or an int, widened to float). bool is an int
-        # subclass, so reject it explicitly — same guard as want_int.
+        # subclass, so reject it explicitly — same guard as want_int. Unlike want_int we must
+        # also reject non-finite values: YAML resolves `.nan`/`.inf` to floats, and `nan`
+        # passes any `< minimum` check (every comparison with nan is False) — so a configured
+        # `run_budget_usd: .nan` would SILENTLY DISABLE the cap (nan > 0 is False). Reject
+        # non-finite explicitly so an unusable budget fails loudly instead.
         if key not in data:
             return default
         v = data[key]
         if isinstance(v, bool) or not isinstance(v, (int, float)):
             problems.append(f"{key} must be a number >= {minimum} (got {v!r})")
+            return default
+        if not math.isfinite(v):
+            problems.append(f"{key} must be a finite number >= {minimum} (got {v!r})")
             return default
         if v < minimum:
             problems.append(f"{key} must be >= {minimum} (got {v})")
