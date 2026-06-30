@@ -1348,6 +1348,9 @@ def _session_outcomes(paths: Paths) -> dict[str, dict]:
             continue
         if duration is not None:
             outcome["duration_seconds"] = duration
+        # The session's cost (issue #41): the total_cost_usd from its stream-json result
+        # event, or None if it never emitted one (killed/crashed before finishing).
+        outcome["cost_usd"] = read_progress(sdir / "session.out").cost_usd
         outcomes[tid] = outcome
     return outcomes
 
@@ -1369,12 +1372,18 @@ def write_run_summary(paths: Paths, config: Config, reason: str) -> dict:
             "attempts": retry_count(paths.retries_ledger, t.id),
             "integration": out,
             "followups": list(out["followups"]) if out else [],
+            # this task's latest session cost (issue #41); None if unknown/not finished
+            "cost_usd": out.get("cost_usd") if out else None,
         }
         rows.append(row)
+    # Project total = sum of the per-task row costs, so total == sum(rows) by construction
+    # (no disagreement between the headline figure and the rows that compose it).
+    total_cost = sum(r["cost_usd"] for r in rows if r["cost_usd"])
     summary = {
         "generated_at": _now(),
         "reason": reason,
         "counts": report["counts"],
+        "total_cost_usd": total_cost,
         "tasks": rows,
         "stuck": report["stuck"],
     }
