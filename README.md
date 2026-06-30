@@ -144,6 +144,10 @@ model: claude-opus-4-8        # passed to `claude --model`
 max_parallel: 3               # WIP limit / number of concurrent worktrees
 base_branch: main             # what feature branches fork from and merge into
 max_iterations: 100           # global safety stop for the outer loop
+run_budget_seconds: 0         # whole-run wall-clock ceiling (int >= 0; 0 = unlimited).
+                              # Once spent, the loop stops claiming new tasks, drains
+                              # what's in flight, and reports the cap. Monotonic +
+                              # in-memory, so a killed/resumed run restarts the budget.
 
 integration: pr               # pr | auto-merge | branch
                               #   pr        -> open a PR per finished task (default)
