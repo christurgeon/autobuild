@@ -57,7 +57,7 @@ asserts the whole contract held. It spends real tokens + needs a `claude` login,
 ## Architecture
 
 `autobuild/cli.py` is the thin dispatcher: `argparse` maps a subcommand to a function (in
-`cli.py` or `loop.py`). All commands assume they run from the **target project root**;
+`cli.py` or the `loop.py` facade). All commands assume they run from the **target project root**;
 `Paths.from_cwd()` resolves `root = Path.cwd()` and derives `.autobuild/`, `tasks/`, `GOAL.md`,
 etc. from it (the typed replacement for the bash `PROJECT_ROOT` and its path vars).
 
@@ -119,45 +119,66 @@ Module responsibilities:
   (also persisted to `meta.json`) and a **monotonic `deadline`** (`time.monotonic() +
   task_timeout_seconds`); the loop supervises it with `proc.poll()` plus that deadline — together
   replacing the bash `.running` PID file.
-- **`autobuild/loop.py`** — the outer Ralph-style loop (`run`, holding a single-supervisor
-  `fcntl.flock` on `.autobuild/run.lock`), the reaper (`reap_all` / `reap_session`), session
-  harvesting (`_harvest` / `_classify_sentinel`), the **per-session timeout** (deadline-bounded
-  waits via `_next_wait` / `_wait_until_next_event`, and `_kill_group` / `_signal_session` —
-  `SIGTERM` → `kill_grace_seconds` → `SIGKILL` over the session's process group), `reconcile`
-  (startup crash recovery), `verify_checks`, `integrate`, `file_followups`, `status`,
-  `write_run_summary`, and `clean`. The CLI `reap` maps to `reap` here (a lock-aware
-  wrapper), not `reap_all` directly. `_notify(config, event, message)` is the single,
-  best-effort **notification choke point**: when `config.notify_command` is set it runs that
-  shell command with `AUTOBUILD_EVENT`/`AUTOBUILD_MESSAGE` in the env, bounded by a timeout
-  and swallowing every failure (a broken notifier never breaks a run). It fires on three
-  coarse events — `done` (run end, in `_finish_run`), `halt` (the `BaseBranchLeak` path), and
-  `needs_human` (`_reap_session_locked`) — and is operator-controlled shell, not a security
-  boundary. `_supervise` returns the terminal reason
-  (`drained` / `settled` / `max_iterations`); `_run_locked` passes it (or `halted` from the
-  `BaseBranchLeak` handler) to `_finish_run`, which writes `.autobuild/run-summary.json`
-  (counts + per-task integration outcome/attempts/wall-time + cost + stuck list, reusing
-  `collect_status`) and prints a short digest — best-effort, so a summary-write failure
-  never masks the real outcome or a re-raised halt. Before reading costs it calls
-  `_settle_session_costs` (bounded, best-effort): real `claude` flushes its cost-bearing
-  stream-json `result` event just AFTER `result.json` (which the harness reaps on), so the
-  final draining session(s) are given a short grace to flush before the summary reads them,
-  scoped to this run's own sessions via `run_sids` (#49).
-  Two **worktree-isolation guards** also live here: `_assert_base_clean` (run refuses to start
-  with a dirty base tree — uncommitted source a stray `git add -A` could sweep; `tasks/` +
-  `.autobuild/` exempt, override `AUTOBUILD_ALLOW_DIRTY_BASE=1`) and `base_leak_commits`, which
-  the reaper runs on every session **before integrating**: a non-merge commit on `base_branch`'s
-  first-parent chain since the session's `base_sha` is, by construction, a session that committed
-  onto base (the harness only ever advances base via `--no-ff` merges). The response is scoped to
-  `config.integration`: in `auto-merge` (deliverables merge onto base) it raises `BaseBranchLeak`
-  to halt the whole run; in `pr`/`branch` (base is never integrated onto) it blocks just that task
-  and continues. Either way it writes a `leak.json` marker.
+- **`autobuild/loop.py`** — a thin facade: re-exports the public names `cli.py` and the tests
+  use (`run`, `status`, `reap`, `clean`, `RunLockHeld`, `BaseBranchLeak`, …). The loop itself is
+  split by responsibility across the modules below. A re-export does not redirect calls inside the
+  defining module, so a test that monkeypatches an internal (`_git`, `which`, `os.killpg`, …) must
+  patch the module where it lives (e.g. `integrate._git`), not `loop`.
+- **`autobuild/common.py`** — shared low-level helpers: console logging (`log`/`ok`/`warn`),
+  `_now`, the `_git`/`_gh` subprocess seams, sentinel parsing (`_read_json`,
+  `_classify_sentinel`), and `_notify(config, event, message)`, the single, best-effort
+  **notification choke point**: when `config.notify_command` is set it runs that shell command
+  with `AUTOBUILD_EVENT`/`AUTOBUILD_MESSAGE` in the env, bounded by a timeout and swallowing every
+  failure (a broken notifier never breaks a run). It fires on three coarse events — `done` (run
+  end, in `_finish_run`), `halt` (the `BaseBranchLeak` path), and `needs_human`
+  (`_reap_session_locked`) — and is operator-controlled shell, not a security boundary.
+- **`autobuild/guards.py`** — the single-supervisor `run_lock` (`fcntl.flock` on
+  `.autobuild/run.lock`, `RunLockHeld`), the nested-run refusal (`_assert_not_nested`,
+  `NestedRunRefused`), and two **worktree-isolation guards**: `_assert_base_clean` (run refuses to
+  start with a dirty base tree — uncommitted source a stray `git add -A` could sweep; `tasks/` +
+  `.autobuild/` exempt, override `AUTOBUILD_ALLOW_DIRTY_BASE=1`; raises `DirtyBaseTree`) and
+  `base_leak_commits`, which the reaper runs on every session **before integrating**: a non-merge
+  commit on `base_branch`'s first-parent chain since the session's `base_sha` is, by construction,
+  a session that committed onto base (the harness only ever advances base via `--no-ff` merges).
+  The response is scoped to `config.integration`: in `auto-merge` (deliverables merge onto base)
+  the reaper raises `BaseBranchLeak` to halt the whole run; in `pr`/`branch` (base is never
+  integrated onto) it blocks just that task and continues. Either way it writes a `leak.json`
+  marker.
+- **`autobuild/verify.py`** — `verify_checks` (re-run `config.checks` in the session worktree
+  before integrating) and `_write_checks_log`.
+- **`autobuild/integrate.py`** — `integrate` (`pr` / `auto-merge` / `branch`), the bounded
+  push/PR retry-with-backoff helpers (`_push_branch`, `_open_pr`, permanent-failure classifiers),
+  and `_post_merge_verify` (the auto-merge combined-tree gate).
+- **`autobuild/reaper.py`** — `reap_session` / `_reap_session_locked` (under a per-session
+  `_session_reap_lock`), `_handle_timeout`, `file_followups`, `reap_all`, and `reap_stalled`.
+- **`autobuild/procs.py`** — process-group control: `_signal_session`, `_kill_group`
+  (`SIGTERM` → `kill_grace_seconds` → `SIGKILL` over the session's process group), and the guarded
+  `_kill_orphan_group` used by reconcile.
+- **`autobuild/reconcile.py`** — `reconcile` (startup crash recovery) and `reap`, the lock-aware
+  wrapper the CLI `reap` maps to (not `reap_all` directly).
+- **`autobuild/supervisor.py`** — the outer Ralph-style loop: `run` (holds the run lock),
+  `_run_locked`, `_supervise`, session harvesting (`_harvest`), and the **per-session timeout**
+  (deadline-bounded waits via `_next_wait` / `_wait_until_next_event`). `_supervise` returns the
+  terminal reason (`drained` / `settled` / `max_iterations` / a budget cap); `_run_locked` passes
+  it (or `halted` from the `BaseBranchLeak` handler) to `_finish_run`.
+- **`autobuild/costs.py`** — `_run_spend` (the per-run cost-budget sum, scoped to this run's
+  `run_sids`) and `_settle_session_costs` (bounded, best-effort): real `claude` flushes its
+  cost-bearing stream-json `result` event just AFTER `result.json` (which the harness reaps on),
+  so the final draining session(s) are given a short grace to flush before the summary reads them
+  (#49).
+- **`autobuild/report.py`** — `collect_status` / `status`, `write_run_summary`, `_finish_run`
+  (settles costs, writes `.autobuild/run-summary.json` — counts + per-task integration
+  outcome/attempts/wall-time + cost + stuck list — prints a short digest, and fires `done`;
+  best-effort, so a summary-write failure never masks the real outcome or a re-raised halt), and
+  `clean`.
 - **`autobuild/preflight.py`** — `autobuild doctor`: cheap, side-effect-free environment
   checks each returning `(level, name, detail)` (PASS/WARN/FAIL). `doctor` prints a report
   and exits non-zero if any check FAILs (WARN never fails); `assert_run_preflight` runs the
   **critical** subset (`claude` on PATH + git identity) at the start of `_run_locked`, before
   claiming or spawning, raising `PreflightError` so a misconfigured host aborts early instead
   of wasting sessions. doctor only *reports* (the base-tree-clean check is a WARN); `run` keeps
-  enforcing via `_assert_base_clean`. Imports loop helpers, so loop imports it lazily.
+  enforcing via `_assert_base_clean`. Imports from `common`/`guards` only (never `loop`), so
+  `supervisor` can import it without a cycle.
 - **`autobuild/progress.py`** — parse a session's stream-json `session.out` (one JSON event
   per line) into a small `SessionProgress` (`messages` = assistant-event count, a liveness
   proxy; `cost_usd` from the terminal `result` event; `finished`). **Total by construction**
@@ -242,7 +263,7 @@ settle check yields back to claiming when `runnable_tasks` is non-empty rather t
   this idempotency.
 - **Keep the reaper idempotent.** Integration happens *before* the task is marked `done`, and
   the `reaped.json` marker guards against double-integration / double follow-up filing. Preserve
-  both properties when touching `loop.py`.
+  both properties when touching `reaper.py` / `integrate.py`.
 - **The backlog lock is `fcntl.flock` on `.autobuild/backlog.lock`** (auto-released if the holder
   dies — no stale lockdir to strand). Any mutation that must be serialized across parallel runs
   (claiming tasks, allocating follow-up ids) goes through `backlog_lock`.
@@ -266,8 +287,11 @@ settle check yields back to claiming when `runnable_tasks` is non-empty rather t
   its orphans by re-queueing them as a synthetic `TIMEOUT` — so a crash self-heals like a deadline
   kill rather than stranding work. The child runs in its own process group so `_kill_group` can
   signal the whole agent subtree (`os.killpg`); the `pgid` is persisted to `meta.json`.
-- Naming: CLI subcommands map to `run` / `status` / `reap` / `clean` in `loop.py` (plus
+- Naming: CLI subcommands map to `run` / `status` / `reap` / `clean`, re-exported by `loop.py` (plus
   `ab_init` in `cli.py`); module-internal helpers are prefixed `_`.
+- **Keep modules small.** Non-test Python modules under `autobuild/` must stay under ~400 lines.
+  When a change would push a module past that, split it by responsibility (as `loop.py` was split
+  into `supervisor` / `reaper` / `integrate` / …). Tests may be longer.
 - Minimal dependencies by design: **PyYAML** is the only runtime dep; everything else (process
   orchestration via `subprocess`, JSON sentinels, the claim lock) is the standard library. Match
   that style unless you're deliberately adding a dependency.

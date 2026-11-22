@@ -6,7 +6,11 @@ import time
 
 import pytest
 
+from autobuild import integrate as integrate_mod
 from autobuild import loop as loop_mod
+from autobuild import procs as procs_mod
+from autobuild import reaper as reaper_mod
+from autobuild import reconcile as reconcile_mod
 from autobuild.config import Config
 from autobuild.loop import (
     collect_status,
@@ -257,7 +261,7 @@ def test_reap_pr_mode_without_gh_leaves_branch_and_marks_done(git_repo, monkeypa
     add_task(paths, "task-001")
     make_worktree(paths, "sess-task-001", "task-001", "main")
     make_session(paths, "task-001", "COMPLETE")
-    monkeypatch.setattr(loop_mod, "which", lambda name: None)  # gh absent
+    monkeypatch.setattr(integrate_mod, "which", lambda name: None)  # gh absent
     reap_session(paths.sessions_dir / "sess-task-001", Config(integration="pr"), paths)
     assert read_task(paths.tasks_dir / "task-001.md").status == "done"
 
@@ -273,9 +277,9 @@ def _cp(returncode=0, stdout="", stderr=""):
 def _pr_integrate(monkeypatch, paths, *, git_fn, gh_fn, retries=2):
     """Run integrate() in pr mode with gh present and stubbed _git/_gh seams; capture
     the injected backoff sleeps. Returns (success, detail, slept)."""
-    monkeypatch.setattr(loop_mod, "which", lambda name: "gh")
-    monkeypatch.setattr(loop_mod, "_git", git_fn)
-    monkeypatch.setattr(loop_mod, "_gh", gh_fn)
+    monkeypatch.setattr(integrate_mod, "which", lambda name: "gh")
+    monkeypatch.setattr(integrate_mod, "_git", git_fn)
+    monkeypatch.setattr(integrate_mod, "_gh", gh_fn)
     sdir = paths.sessions_dir / "s"
     sdir.mkdir(parents=True, exist_ok=True)
     slept: list[int] = []
@@ -496,14 +500,14 @@ def test_integrate_auto_merge_conflict_is_not_retried(git_repo, monkeypatch, div
     paths = setup(git_repo)
     dep = diverging_dep(git_repo)            # main and autobuild/<dep> conflict on a line
     merges = {"n": 0}
-    real_git = loop_mod._git
+    real_git = integrate_mod._git
 
     def git_fn(root, *args):
         if args[:1] == ("merge",) and "--abort" not in args:
             merges["n"] += 1
         return real_git(root, *args)
 
-    monkeypatch.setattr(loop_mod, "_git", git_fn)
+    monkeypatch.setattr(integrate_mod, "_git", git_fn)
     sdir = paths.sessions_dir / "s"
     sdir.mkdir(parents=True, exist_ok=True)
     slept: list[int] = []
@@ -1258,7 +1262,7 @@ def test_kill_group_already_exited_is_noop(git_repo, stub_bin):
 def test_signal_session_esrch_suppressed(monkeypatch):
     def raise_esrch(pgid, sig):
         raise ProcessLookupError
-    monkeypatch.setattr(loop_mod.os, "killpg", raise_esrch)
+    monkeypatch.setattr(procs_mod.os, "killpg", raise_esrch)
     rs = RunningSession("s", "task-001", None, None, None, None, pgid=12345)
     loop_mod._signal_session(rs, signal.SIGTERM)  # ProcessLookupError suppressed -> no raise
 
@@ -1440,7 +1444,7 @@ def test_timeout_requeue_aborts_when_branch_undeletable(git_repo, monkeypatch):
     add_task(paths, "task-001", status="in-progress")
     make_worktree(paths, "sess-task-001", "task-001", "main")
     sdir = make_session(paths, "task-001", "TIMEOUT")
-    monkeypatch.setattr(loop_mod, "delete_branch", lambda *a, **k: False)   # delete fails
+    monkeypatch.setattr(reaper_mod, "delete_branch", lambda *a, **k: False)   # delete fails
     reap_session(sdir, Config(integration="branch"), paths)                 # default retries=1
     assert read_task(paths.tasks_dir / "task-001.md").status == "timeout"   # terminal, not todo
     assert retry_count(paths.retries_ledger, "task-001") == 0               # ledger cleared
@@ -1649,7 +1653,7 @@ def test_pr_mode_push_failure_keeps_done_with_clear_message(git_repo, monkeypatc
     paths = setup(git_repo)
     add_task(paths, "task-001")
     make_worktree(paths, "sess-task-001", "task-001", "main")
-    monkeypatch.setattr(loop_mod, "which", lambda name: "/usr/bin/gh")   # pretend gh present
+    monkeypatch.setattr(integrate_mod, "which", lambda name: "/usr/bin/gh")   # pretend gh present
     # git_repo has no 'origin' remote -> push fails before gh is even invoked
     success, detail = loop_mod.integrate("task-001", Config(integration="pr"), paths,
                                          paths.sessions_dir)
@@ -1689,8 +1693,8 @@ def test_reaped_json_written_atomically(git_repo, monkeypatch):
     add_task(paths, "task-001")
     sdir = make_session(paths, "task-001", "BLOCKED")
     calls = []
-    real = loop_mod._atomic_write_json
-    monkeypatch.setattr(loop_mod, "_atomic_write_json",
+    real = reaper_mod._atomic_write_json
+    monkeypatch.setattr(reaper_mod, "_atomic_write_json",
                         lambda path, payload: (calls.append(str(path)), real(path, payload))[1])
     reap_session(sdir, Config(integration="branch"), paths)
     assert any(c.endswith("reaped.json") for c in calls)
@@ -1732,7 +1736,7 @@ def test_reap_rechecks_reaped_json_under_lock(git_repo, monkeypatch):
         (sd / "reaped.json").write_text("{}")            # a winner that finished in the gap
         yield
 
-    monkeypatch.setattr(loop_mod, "_session_reap_lock", winner_finished)
+    monkeypatch.setattr(reaper_mod, "_session_reap_lock", winner_finished)
     assert reap_session(sdir, Config(integration="branch"), paths) is False
     assert [p.name for p in paths.tasks_dir.glob("*.md")] == ["task-001.md"]  # no follow-up
 
@@ -1780,9 +1784,9 @@ def test_reconcile_kills_orphan_pgid_before_recovering(git_repo, monkeypatch):
     pgid = os.getpgrp() + 100000                          # >1, not our group, not real
     sdir = _orphan_session(paths, {"pgid": pgid})
     events = []
-    monkeypatch.setattr(loop_mod.os, "killpg", lambda p, s: events.append(("kill", p, s)))
-    real = loop_mod.write_sentinel_if_absent
-    monkeypatch.setattr(loop_mod, "write_sentinel_if_absent",
+    monkeypatch.setattr(procs_mod.os, "killpg", lambda p, s: events.append(("kill", p, s)))
+    real = reconcile_mod.write_sentinel_if_absent
+    monkeypatch.setattr(reconcile_mod, "write_sentinel_if_absent",
                         lambda *a, **k: (events.append(("recover",)), real(*a, **k))[1])
     reconcile(paths, sweep_in_progress=True)
     assert ("kill", pgid, signal.SIGKILL) in events
@@ -1798,7 +1802,7 @@ def test_reconcile_never_kills_unsafe_pgid(git_repo, monkeypatch, field):
         field["pgid"] = os.getpgrp()                      # never kill the harness's own group
     sdir = _orphan_session(paths, field)
     called = []
-    monkeypatch.setattr(loop_mod.os, "killpg", lambda p, s: called.append((p, s)))
+    monkeypatch.setattr(procs_mod.os, "killpg", lambda p, s: called.append((p, s)))
     reconcile(paths, sweep_in_progress=True)
     assert called == []                                   # never signalled
     assert json.loads((sdir / "result.json").read_text())["status"] == "TIMEOUT"  # still recovered
@@ -1812,7 +1816,7 @@ def test_reconcile_orphan_kill_suppresses_signal_errors(git_repo, monkeypatch, e
     def boom(p, s):
         raise exc()
 
-    monkeypatch.setattr(loop_mod.os, "killpg", boom)
+    monkeypatch.setattr(procs_mod.os, "killpg", boom)
     reconcile(paths, sweep_in_progress=True)              # must not raise / abort the sweep
     assert json.loads((sdir / "result.json").read_text())["status"] == "TIMEOUT"
 
@@ -1843,7 +1847,7 @@ def test_reconcile_without_sweep_never_kills(git_repo, monkeypatch):
     paths = setup(git_repo)
     sdir = _orphan_session(paths, {"pgid": os.getpgrp() + 100000})
     called = []
-    monkeypatch.setattr(loop_mod.os, "killpg", lambda p, s: called.append(1))
+    monkeypatch.setattr(procs_mod.os, "killpg", lambda p, s: called.append(1))
     reconcile(paths)                                      # sweep gated off (default)
     assert called == []
     assert not (sdir / "result.json").exists()           # no BLOCK either
