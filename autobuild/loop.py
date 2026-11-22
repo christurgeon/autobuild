@@ -31,6 +31,7 @@ from .common import (  # noqa: F401
     _NOTIFY_TIMEOUT_SECONDS,
     _c,
     _classify_sentinel,
+    current_branch,
     _gh,
     _git,
     _notify,
@@ -43,8 +44,11 @@ from .common import (  # noqa: F401
 from .costs import _cost_pending, _run_spend, _settle_session_costs  # noqa: F401
 from .guards import (  # noqa: F401
     BaseBranchLeak,
+    BaseBranchNotCheckedOut,
     DirtyBaseTree,
+    MergeUndoFailed,
     NestedRunRefused,
+    RunHalted,
     RunLockHeld,
     _assert_base_clean,
     _assert_not_nested,
@@ -59,6 +63,7 @@ from .integrate import (  # noqa: F401
     _pr_exists,
     _push_branch,
     _push_is_permanent,
+    _undo_merge,
     _with_retries,
     integrate,
 )

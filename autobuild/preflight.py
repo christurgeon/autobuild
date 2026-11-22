@@ -4,8 +4,8 @@ of late, scattered errors (or N wasted sessions).
 
 Each check is cheap and side-effect-free, returning a `(level, name, detail)` triple
 where level is PASS / WARN / FAIL. `doctor` prints the report and exits non-zero if any
-check FAILs (a WARN never fails). The critical (FAIL-level) subset — `claude` on PATH and
-a git commit identity — is also wired into `run()` via `assert_run_preflight`, so a real
+check FAILs (a WARN never fails). The critical (FAIL-level) subset — `claude` on PATH, a
+git commit identity, and (auto-merge only) base_branch checked out — is also wired into `run()` via `assert_run_preflight`, so a real
 run aborts early with the same message before claiming or spawning.
 
 `doctor` only *reports*; `run` *enforces* (it keeps its own hard `_assert_base_clean`
@@ -18,7 +18,7 @@ import shutil
 import subprocess
 from shutil import which
 
-from .common import _git, log, ok, warn
+from .common import _git, current_branch, log, ok, warn
 from .config import Config
 from .guards import dirty_base_paths
 from .paths import Paths
@@ -80,6 +80,19 @@ def _check_base_branch(paths: Paths, config: Config) -> CheckResult:
             f"worktrees fork from it")
 
 
+def _check_base_checked_out(paths: Paths, config: Config) -> CheckResult | None:
+    # auto-merge runs `git merge` in the main checkout, so it lands on whatever is checked out.
+    if config.integration != "auto-merge":
+        return None
+    head = current_branch(paths.root)
+    if head == config.base_branch:
+        return (PASS, "base checkout", f"{head} is checked out")
+    return (FAIL, "base checkout",
+            f"auto-merge merges into the checked-out branch; main checkout is on "
+            f"{head or 'a detached HEAD'}, not {config.base_branch} — "
+            f"`git checkout {config.base_branch}`")
+
+
 def _check_base_clean(paths: Paths, config: Config) -> CheckResult:
     # WARN only: `run` hard-enforces this via `_assert_base_clean`. doctor just surfaces it.
     dirty = dirty_base_paths(paths)
@@ -132,14 +145,17 @@ _CHECKS = (
     _check_claude,
     _check_git_identity,
     _check_base_branch,
+    _check_base_checked_out,
     _check_base_clean,
     _check_gh,
     _check_disk,
 )
 
 # The subset `run()` enforces early (before claiming/spawning): a session genuinely
-# cannot do its job without these, so a real run should abort rather than burn tokens.
-CRITICAL_CHECKS = (_check_claude, _check_git_identity)
+# cannot do its job without these (and auto-merge cannot integrate onto base without the
+# base checkout), so a real run should abort rather than burn tokens. A check that does
+# not apply returns None and is skipped.
+CRITICAL_CHECKS = (_check_claude, _check_git_identity, _check_base_checked_out)
 
 
 # --- orchestration -----------------------------------------------------------
@@ -187,7 +203,7 @@ def assert_run_preflight(paths: Paths, config: Config) -> None:
     so the operator can run `autobuild doctor` for the full picture."""
     failures = [
         f"{name}: {detail}"
-        for level, name, detail in (c(paths, config) for c in CRITICAL_CHECKS)
+        for level, name, detail in filter(None, (c(paths, config) for c in CRITICAL_CHECKS))
         if level == FAIL
     ]
     if failures:

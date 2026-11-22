@@ -26,6 +26,7 @@ run_budget_usd: 0             # whole-run COST ceiling in USD (number >= 0; 0 = 
 integration: pr               # pr | auto-merge | branch
                               #   pr        -> open a PR per finished task (default)
                               #   auto-merge-> if checks pass, merge the branch
+                              #     (requires base_branch checked out)
                               #   branch    -> just leave the branch; you merge later
 
 integration_max_retries: 2    # (pr mode) extra attempts with backoff for a transient
@@ -45,7 +46,8 @@ verify_checks: true           # reaper re-runs `checks` in the worktree before
 verify_after_merge: true      # auto-merge only: after a clean merge, re-run `checks`
                               # on the COMBINED base tree (catches semantic skew two
                               # green branches can't); on failure the merge is reverted
-                              # and the task blocked. false -> land merges unverified.
+                              # (base reset to its pre-merge commit; uncommitted task
+                              # status is kept) and the task blocked. false -> land merges unverified.
 
 claude_cmd: claude            # override if your CLI binary is named differently
 
@@ -79,7 +81,7 @@ notifier, whatever — nothing is hardcoded into the harness.
 | `AUTOBUILD_EVENT` | When it fires | `AUTOBUILD_MESSAGE` |
 |---|---|---|
 | `done` | the run ended (`drained` / `settled` / `max_iterations`) | the terminal reason + per-status task counts |
-| `halt` | a session escaped onto `base_branch` and the run **halted** (auto-merge) | the leaking base branch / session / task |
+| `halt` | the run **halted** (auto-merge): a session escaped onto `base_branch`, `base_branch` is not checked out, or a failed merge could not be undone | the cause and the branch / session / task |
 | `needs_human` | a session reported `NEEDS_HUMAN` | the task id + its summary |
 
 Events are **low-volume by design** — run-level plus `NEEDS_HUMAN`, never one-per-task —

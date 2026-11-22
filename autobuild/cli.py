@@ -161,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
         except preflight_mod.PreflightError as e:
             _err(str(e))
             return 2
-        except loop_mod.BaseBranchLeak as e:
+        except loop_mod.RunHalted as e:
             _err(str(e))
             return 2
     elif args.command == "status":
@@ -169,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "reap":
         try:
             loop_mod.reap(paths, config)
-        except loop_mod.BaseBranchLeak as e:
+        except loop_mod.RunHalted as e:
             _err(str(e))
             return 2
     elif args.command == "clean":

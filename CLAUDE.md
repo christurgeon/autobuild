@@ -120,17 +120,17 @@ Module responsibilities:
   task_timeout_seconds`); the loop supervises it with `proc.poll()` plus that deadline — together
   replacing the bash `.running` PID file.
 - **`autobuild/loop.py`** — a thin facade: re-exports the public names `cli.py` and the tests
-  use (`run`, `status`, `reap`, `clean`, `RunLockHeld`, `BaseBranchLeak`, …). The loop itself is
+  use (`run`, `status`, `reap`, `clean`, `RunLockHeld`, `RunHalted`, `BaseBranchLeak`, …). The loop itself is
   split by responsibility across the modules below. A re-export does not redirect calls inside the
   defining module, so a test that monkeypatches an internal (`_git`, `which`, `os.killpg`, …) must
   patch the module where it lives (e.g. `integrate._git`), not `loop`.
 - **`autobuild/common.py`** — shared low-level helpers: console logging (`log`/`ok`/`warn`),
-  `_now`, the `_git`/`_gh` subprocess seams, sentinel parsing (`_read_json`,
+  `_now`, the `_git`/`_gh` subprocess seams, `current_branch`, sentinel parsing (`_read_json`,
   `_classify_sentinel`), and `_notify(config, event, message)`, the single, best-effort
   **notification choke point**: when `config.notify_command` is set it runs that shell command
   with `AUTOBUILD_EVENT`/`AUTOBUILD_MESSAGE` in the env, bounded by a timeout and swallowing every
   failure (a broken notifier never breaks a run). It fires on three coarse events — `done` (run
-  end, in `_finish_run`), `halt` (the `BaseBranchLeak` path), and `needs_human`
+  end, in `_finish_run`), `halt` (the `RunHalted` path), and `needs_human`
   (`_reap_session_locked`) — and is operator-controlled shell, not a security boundary.
 - **`autobuild/guards.py`** — the single-supervisor `run_lock` (`fcntl.flock` on
   `.autobuild/run.lock`, `RunLockHeld`), the nested-run refusal (`_assert_not_nested`,
@@ -143,12 +143,17 @@ Module responsibilities:
   The response is scoped to `config.integration`: in `auto-merge` (deliverables merge onto base)
   the reaper raises `BaseBranchLeak` to halt the whole run; in `pr`/`branch` (base is never
   integrated onto) it blocks just that task and continues. Either way it writes a `leak.json`
-  marker.
+  marker. Every run-halting condition subclasses `RunHalted`: `BaseBranchLeak`,
+  `BaseBranchNotCheckedOut`, and `MergeUndoFailed`.
 - **`autobuild/verify.py`** — `verify_checks` (re-run `config.checks` in the session worktree
   before integrating) and `_write_checks_log`.
 - **`autobuild/integrate.py`** — `integrate` (`pr` / `auto-merge` / `branch`), the bounded
   push/PR retry-with-backoff helpers (`_push_branch`, `_open_pr`, permanent-failure classifiers),
-  and `_post_merge_verify` (the auto-merge combined-tree gate).
+  and `_post_merge_verify` (the auto-merge combined-tree gate). Before an auto-merge, `integrate`
+  raises `BaseBranchNotCheckedOut` if the main checkout is not on `base_branch`. `_undo_merge`
+  undoes a merge that fails the post-merge checks with `git reset --merge` (fallback: reset the
+  merge-footprint paths to HEAD, then `reset --merge` again; raises `MergeUndoFailed` to halt if
+  that fails). It never uses `reset --hard`, which would revert uncommitted `tasks/` status.
 - **`autobuild/reaper.py`** — `reap_session` / `_reap_session_locked` (under a per-session
   `_session_reap_lock`), `_handle_timeout`, `file_followups`, `reap_all`, and `reap_stalled`.
 - **`autobuild/procs.py`** — process-group control: `_signal_session`, `_kill_group`
@@ -160,7 +165,7 @@ Module responsibilities:
   `_run_locked`, `_supervise`, session harvesting (`_harvest`), and the **per-session timeout**
   (deadline-bounded waits via `_next_wait` / `_wait_until_next_event`). `_supervise` returns the
   terminal reason (`drained` / `settled` / `max_iterations` / a budget cap); `_run_locked` passes
-  it (or `halted` from the `BaseBranchLeak` handler) to `_finish_run`.
+  it (or `halted` from the `RunHalted` handler) to `_finish_run`.
 - **`autobuild/costs.py`** — `_run_spend` (the per-run cost-budget sum, scoped to this run's
   `run_sids`) and `_settle_session_costs` (bounded, best-effort): real `claude` flushes its
   cost-bearing stream-json `result` event just AFTER `result.json` (which the harness reaps on),
@@ -174,7 +179,8 @@ Module responsibilities:
 - **`autobuild/preflight.py`** — `autobuild doctor`: cheap, side-effect-free environment
   checks each returning `(level, name, detail)` (PASS/WARN/FAIL). `doctor` prints a report
   and exits non-zero if any check FAILs (WARN never fails); `assert_run_preflight` runs the
-  **critical** subset (`claude` on PATH + git identity) at the start of `_run_locked`, before
+  **critical** subset (`claude` on PATH, git identity, and — auto-merge only — `base_branch`
+  checked out in the main checkout) at the start of `_run_locked`, before
   claiming or spawning, raising `PreflightError` so a misconfigured host aborts early instead
   of wasting sessions. doctor only *reports* (the base-tree-clean check is a WARN); `run` keeps
   enforcing via `_assert_base_clean`. Imports from `common`/`guards` only (never `loop`), so
@@ -209,9 +215,12 @@ This is the part that requires reading multiple files to understand:
    `COMPLETE` it **verifies first**: unless
    `verify_checks: false`, it re-runs `config.checks` against the session's worktree and, if any
    fail, blocks the task and keeps the branch instead of integrating (trust, but verify). For
-   `auto-merge` a second gate (`_post_merge_verify`, opt-out `verify_after_merge`) re-runs the
-   checks against the **combined base tree** after the `--no-ff` merge and **hard-resets base back
-   to its pre-merge HEAD** if they fail — catching semantic merge skew two independently-green
+   `auto-merge` the reaper first requires `base_branch` to be checked out (else
+   `BaseBranchNotCheckedOut` halts before the merge; the session stays reapable), and a second
+   gate (`_post_merge_verify`, opt-out `verify_after_merge`) re-runs the
+   checks against the **combined base tree** after the `--no-ff` merge and **undoes the merge with
+   `git reset --merge`** if they fail (fallback: reset the merge-footprint paths to HEAD, then
+   `reset --merge` again; halts with `MergeUndoFailed` if that fails) — catching semantic merge skew two independently-green
    branches can produce with no textual conflict. If they
    pass it **integrates** (`integrate` → `pr` via `gh` / `auto-merge` / `branch`) and only then
    `set_status`es the task `done` — so a failed auto-merge leaves the task `blocked`, not falsely
@@ -272,6 +281,10 @@ settle check yields back to claiming when `runnable_tasks` is non-empty rather t
   than fighting over the same sessions. `reap` is lock-aware — it only performs the dangerous
   in-progress recovery reconcile sweep (which re-queues orphans as a synthetic `TIMEOUT`) when it
   can take the lock (i.e. no live `run`).
+- **auto-merge requires `base_branch` checked out** in the main checkout, because `git merge`
+  lands on whatever is checked out. A mismatch refuses the run (critical preflight) or halts it
+  before merging (`BaseBranchNotCheckedOut`). The post-merge undo uses `reset --merge`, never
+  `reset --hard`, so uncommitted `tasks/` status and human edits survive.
 - **`run` refuses to nest.** A spawned session carries `AUTOBUILD_IN_SESSION=1` (set in
   `session._session_env`); `run` checks it via `_assert_not_nested` *before* the run lock and raises
   `NestedRunRefused` (non-zero exit) so a session can't recursively spawn more sessions (fork-bomb /

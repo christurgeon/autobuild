@@ -99,6 +99,14 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
 
 
+def current_branch(root: Path) -> str | None:
+    """The branch checked out in `root`, or None on a detached HEAD or a git error."""
+    r = _git(root, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip() or None
+
+
 def _gh(root: Path, *args: str) -> subprocess.CompletedProcess:
     """Run `gh` in `root`. Mirrors `_git` so the gh seam is monkeypatchable in tests
     and the retry helpers have a single place to invoke gh."""

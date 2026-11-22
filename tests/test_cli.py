@@ -137,3 +137,40 @@ def test_invalid_config_exits_2_without_spawning(tmp_path, monkeypatch, capsys):
     assert "integration" in err and "max_parallel" in err
     # the loop never ran: no session directories were created
     assert not any(paths.sessions_dir.iterdir())
+
+
+def test_reap_cli_exits_2_when_head_moved_off_base(git_repo, git, monkeypatch, capsys):
+    """A pending COMPLETE auto-merge session with the main checkout on another branch:
+    `reap` halts (exit 2) and names the branch instead of merging onto it."""
+    import json
+
+    from autobuild.worktree import make_worktree
+
+    monkeypatch.chdir(git_repo)
+    cli.main(["init"])
+    paths = Paths(git_repo)
+    lines = [ln for ln in paths.config_file.read_text().splitlines()
+             if not ln.startswith("integration:")]
+    paths.config_file.write_text("\n".join(lines + ["integration: auto-merge"]) + "\n")
+    task = paths.tasks_dir / "task-901.md"
+    task.write_text("---\nid: task-901\ntitle: t\nstatus: in-progress\npriority: 1\n"
+                    "depends_on: []\n---\n\n## Goal\nx\n", encoding="utf-8")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-q", "-m", "scaffold")
+    paths.ensure_runtime_dirs()
+    wt = make_worktree(paths, "sess-901", "task-901", "main")
+    (wt / "feature.txt").write_text("x")
+    git(wt, "add", "-A")
+    git(wt, "commit", "-q", "-m", "feature work")
+    sdir = paths.sessions_dir / "sess-901"
+    sdir.mkdir()
+    (sdir / "meta.json").write_text(json.dumps({
+        "session": "sess-901", "task": "task-901", "task_file": str(task),
+        "worktree": str(wt), "branch": "autobuild/task-901", "status": "in-progress"}))
+    (sdir / "result.json").write_text(json.dumps({
+        "task": "task-901", "status": "COMPLETE", "summary": "s", "followups": []}))
+    git(git_repo, "checkout", "-q", "-b", "other")
+
+    assert cli.main(["reap"]) == 2
+    assert "other" in capsys.readouterr().err
+    assert not (sdir / "reaped.json").exists()
