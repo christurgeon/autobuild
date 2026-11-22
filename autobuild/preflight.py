@@ -18,8 +18,9 @@ import shutil
 import subprocess
 from shutil import which
 
+from .common import _git, log, ok, warn
 from .config import Config
-from .loop import _git, dirty_base_paths, log, ok, warn
+from .guards import dirty_base_paths
 from .paths import Paths
 
 PASS = "PASS"

@@ -68,7 +68,14 @@ lock — is the standard library.
 | `worktree.py` | a git worktree + branch per session, with each task's `done` dependency branches layered onto its base |
 | `session.py` | spawn one fresh `claude -p` via `subprocess.Popen` |
 | `progress.py` | parse a session's stream-json `session.out` into `{messages, cost_usd, finished}` |
-| `loop.py` | the outer loop, the reaper, crash-recovery reconcile, status, clean |
+| `loop.py` | thin facade re-exporting the loop modules below |
+| `supervisor.py` | the outer loop: `run`, scheduling, harvesting, per-session deadlines |
+| `reaper.py` | act on a session's `result.json`: verify, integrate, timeout re-queue, follow-ups |
+| `integrate.py` / `verify.py` | pr / auto-merge / branch integration; the checks gates |
+| `guards.py` | run lock, nested-run refusal, base-leak and dirty-base checks |
+| `reconcile.py` / `procs.py` | crash-recovery reconcile + `reap`; process-group kills |
+| `report.py` / `costs.py` | status, run summary, clean; per-run cost accounting |
+| `common.py` | logging, notifications, git/gh seams, sentinel parsing |
 | `paths.py` | the one place every `.autobuild/` location is defined |
 
 Parallelism is real OS processes (`Popen` + `poll()`), supervised by a single `run`

@@ -14,6 +14,7 @@ import subprocess
 import pytest
 
 from autobuild import cli
+from autobuild import common as common_mod
 from autobuild import loop as loop_mod
 from autobuild.config import Config, load_config
 from autobuild.loop import _notify, _run_end_message
@@ -24,7 +25,7 @@ from autobuild.paths import Paths
 
 def test_empty_notify_command_runs_nothing(monkeypatch):
     called = []
-    monkeypatch.setattr(loop_mod.subprocess, "run",
+    monkeypatch.setattr(common_mod.subprocess, "run",
                         lambda *a, **k: called.append((a, k)))
     _notify(Config(notify_command=""), "done", "msg")
     assert called == []  # disabled: no subprocess at all
@@ -47,7 +48,7 @@ def test_notify_swallows_nonzero_exit(capsys):
 def test_notify_swallows_timeout(monkeypatch, capsys):
     def _raise_timeout(*a, **k):
         raise subprocess.TimeoutExpired(cmd="slow", timeout=loop_mod._NOTIFY_TIMEOUT_SECONDS)
-    monkeypatch.setattr(loop_mod.subprocess, "run", _raise_timeout)
+    monkeypatch.setattr(common_mod.subprocess, "run", _raise_timeout)
     _notify(Config(notify_command="sleep 99"), "halt", "msg")  # must NOT raise / sleep
     assert "timed out" in capsys.readouterr().out
 
@@ -55,7 +56,7 @@ def test_notify_swallows_timeout(monkeypatch, capsys):
 def test_notify_swallows_oserror(monkeypatch, capsys):
     def _raise_oserror(*a, **k):
         raise OSError("boom")
-    monkeypatch.setattr(loop_mod.subprocess, "run", _raise_oserror)
+    monkeypatch.setattr(common_mod.subprocess, "run", _raise_oserror)
     _notify(Config(notify_command="whatever"), "done", "msg")  # must NOT raise
     assert "notify_command failed" in capsys.readouterr().out
 
@@ -67,7 +68,7 @@ def test_notify_timeout_is_bounded(monkeypatch):
         class R:  # minimal CompletedProcess stand-in
             returncode = 0
         return R()
-    monkeypatch.setattr(loop_mod.subprocess, "run", _capture)
+    monkeypatch.setattr(common_mod.subprocess, "run", _capture)
     _notify(Config(notify_command="true"), "done", "msg")
     assert seen.get("timeout") == loop_mod._NOTIFY_TIMEOUT_SECONDS  # wedged notifier can't hang
 
