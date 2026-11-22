@@ -12,7 +12,7 @@ import time
 from .common import _classify_sentinel, _notify, log, ok, warn
 from .config import Config
 from .costs import _run_spend
-from .guards import BaseBranchLeak, _assert_base_clean, _assert_not_nested, run_lock
+from .guards import RunHalted, _assert_base_clean, _assert_not_nested, run_lock
 from .paths import Paths
 from .preflight import assert_run_preflight
 from .procs import _kill_group
@@ -141,10 +141,10 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float,
     try:
         reason = _supervise(paths, config, running, run_sids,
                             sleep_seconds=sleep_seconds, monotonic=monotonic)
-    except BaseBranchLeak as exc:
-        # base is corrupt (a session escaped onto it): stop now and KILL any sessions
-        # still running — they'd only burn tokens on a doomed run, and the same leak
-        # check would refuse to integrate them anyway. Leave a summary (reason `halted`)
+    except RunHalted as exc:
+        # base can't be integrated onto (a session escaped onto it, it isn't checked out,
+        # or a failed merge couldn't be undone): stop now and KILL any sessions still
+        # running — they'd only burn tokens on a run that can't integrate them. Leave a summary (reason `halted`)
         # so even an aborted run is legible, notify the operator of the halt, then
         # re-raise for the CLI to report. `running` is mutated in place by _supervise,
         # so it holds the live set.
@@ -159,14 +159,14 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float,
 def _supervise(paths: Paths, config: Config, running: list[RunningSession],
                run_sids: set[str], *, sleep_seconds: float, monotonic=time.monotonic) -> str:
     """The scheduling loop. Appends spawned sessions to `running` and keeps it in sync
-    with the live set IN PLACE (`running[:] = ...`) so a caller catching BaseBranchLeak
+    with the live set IN PLACE (`running[:] = ...`) so a caller catching RunHalted
     can still see — and kill — what was running when the halt fired.
 
     Returns the terminal reason the run ended for — `drained` (backlog empty),
     `settled` (only blocked/unsatisfiable work left), or one of the budget caps with work
     left unstarted: `max_iterations`, `run_budget_seconds`, `run_budget_usd` — so the caller
     records it in the run summary instead of re-deriving it. (The `halted` reason is supplied
-    by the BaseBranchLeak handler.)"""
+    by the RunHalted handler.)"""
     iteration = 0
     # Optional whole-run WALL-CLOCK budget: a monotonic deadline computed ONCE here (not per
     # poll tick — same reasoning as max_iterations below: a long fleet of poll ticks must not

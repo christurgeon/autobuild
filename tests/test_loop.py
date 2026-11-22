@@ -24,7 +24,7 @@ from autobuild.loop import (
 from autobuild.paths import Paths
 from autobuild.retries import record_timeout, retry_count
 from autobuild.session import RunningSession, spawn_session
-from autobuild.tasks import read_task
+from autobuild.tasks import read_task, set_status
 from autobuild.worktree import branch_name, make_worktree
 
 
@@ -693,6 +693,159 @@ def test_verify_after_merge_false_skips_post_merge(git_repo, git):
     assert read_task(paths.tasks_dir / "task-001.md").status == "done"
     assert "merge task-001" in git(git_repo, "log", "--oneline", "main").stdout
     assert not (sdir / "post-merge-checks.log").exists()
+
+
+# ---- post-merge undo keeps uncommitted state (reset --merge, not --hard) ----
+
+def _commit_tasks(paths, git, *tids):
+    """Commit the task files (and an .autobuild/ ignore) so status edits are uncommitted
+    changes to TRACKED files — the state a `reset --hard` would silently revert."""
+    for tid in tids:
+        add_task(paths, tid)
+    (paths.root / ".gitignore").write_text(".autobuild/\n")
+    git(paths.root, "add", "-A")
+    git(paths.root, "commit", "-q", "-m", "tasks")
+
+
+def _porcelain_paths(git, repo):
+    return [ln[3:] for ln in git(repo, "status", "--porcelain").stdout.splitlines() if ln]
+
+
+def test_post_merge_revert_preserves_uncommitted_task_status(git_repo, git):
+    paths = setup(git_repo)
+    _commit_tasks(paths, git, "task-001", "task-002")
+    sdir = _skew_setup(paths, git)
+    set_status(paths.tasks_dir / "task-002.md", "done")  # uncommitted harness state
+    pre_merge = git(git_repo, "rev-parse", "HEAD").stdout.strip()
+    cfg = Config(integration="auto-merge", checks=[_SKEW_CHECK])
+
+    assert reap_session(sdir, cfg, paths) is True
+    assert git(git_repo, "rev-parse", "HEAD").stdout.strip() == pre_merge
+    assert read_task(paths.tasks_dir / "task-002.md").status == "done"
+    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+    assert _branch_exists(git, git_repo, "task-001")
+
+
+def test_post_merge_revert_falls_back_when_checks_dirty_merged_file(git_repo, git):
+    paths = setup(git_repo)
+    _commit_tasks(paths, git, "task-001", "task-002")
+    sdir = _skew_setup(paths, git)
+    set_status(paths.tasks_dir / "task-002.md", "done")
+    pre_merge = git(git_repo, "rev-parse", "HEAD").stdout.strip()
+    # The check dirties a file the merge brought in, so a plain `reset --merge` refuses.
+    cfg = Config(integration="auto-merge", checks=[f"echo x >> feature.txt; {_SKEW_CHECK}"])
+
+    assert reap_session(sdir, cfg, paths) is True
+    assert git(git_repo, "rev-parse", "HEAD").stdout.strip() == pre_merge
+    assert "merge task-001" not in git(git_repo, "log", "--oneline", "main").stdout
+    assert not (git_repo / "feature.txt").exists()
+    assert read_task(paths.tasks_dir / "task-002.md").status == "done"
+    assert all(p.startswith("tasks/") for p in _porcelain_paths(git, git_repo))
+
+
+def test_post_merge_revert_keeps_unrelated_dirty_tracked_file(git_repo, git):
+    paths = setup(git_repo)
+    (git_repo / "notes.txt").write_text("v1\n")
+    _commit_tasks(paths, git, "task-001")
+    sdir = _skew_setup(paths, git)
+    (git_repo / "notes.txt").write_text("human edit\n")
+    cfg = Config(integration="auto-merge", checks=[_SKEW_CHECK])
+
+    assert reap_session(sdir, cfg, paths) is True
+    assert (git_repo / "notes.txt").read_text() == "human edit\n"
+
+
+def test_post_merge_fallback_keeps_unrelated_dirty_tracked_file(git_repo, git):
+    paths = setup(git_repo)
+    (git_repo / "notes.txt").write_text("v1\n")
+    _commit_tasks(paths, git, "task-001", "task-002")
+    sdir = _skew_setup(paths, git)
+    set_status(paths.tasks_dir / "task-002.md", "done")
+    (git_repo / "notes.txt").write_text("human edit\n")
+    pre_merge = git(git_repo, "rev-parse", "HEAD").stdout.strip()
+    cfg = Config(integration="auto-merge", checks=[f"echo x >> feature.txt; {_SKEW_CHECK}"])
+
+    assert reap_session(sdir, cfg, paths) is True
+    assert git(git_repo, "rev-parse", "HEAD").stdout.strip() == pre_merge
+    assert not (git_repo / "feature.txt").exists()
+    assert (git_repo / "notes.txt").read_text() == "human edit\n"
+    assert read_task(paths.tasks_dir / "task-002.md").status == "done"
+
+
+def test_post_merge_undo_failure_halts(git_repo, git, monkeypatch):
+    paths = setup(git_repo)
+    _commit_tasks(paths, git, "task-001")
+    sdir = _skew_setup(paths, git)
+    real_git = integrate_mod._git
+
+    def fake_git(root, *args):
+        if args[:2] == ("reset", "--merge"):
+            return subprocess.CompletedProcess(args, 128, "", "fatal: not uptodate")
+        return real_git(root, *args)
+
+    monkeypatch.setattr(integrate_mod, "_git", fake_git)
+    cfg = Config(integration="auto-merge", checks=[_SKEW_CHECK])
+    with pytest.raises(loop_mod.MergeUndoFailed) as ei:
+        reap_session(sdir, cfg, paths)
+    assert isinstance(ei.value, loop_mod.RunHalted)
+    assert not (sdir / "reaped.json").exists()
+    assert read_task(paths.tasks_dir / "task-001.md").status == "in-progress"
+
+
+# ---- auto-merge requires base_branch checked out ----------------------------
+
+def _sha(git, repo, ref):
+    return git(repo, "rev-parse", ref).stdout.strip()
+
+
+def test_auto_merge_halts_when_head_not_base(git_repo, git):
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    _worktree_with_commit(paths, git, broken=False)
+    sdir = make_session(paths, "task-001", "COMPLETE", commit="x")
+    git(git_repo, "checkout", "-q", "-b", "other")
+    main_before, other_before = _sha(git, git_repo, "main"), _sha(git, git_repo, "other")
+    cfg = Config(integration="auto-merge")
+
+    with pytest.raises(loop_mod.BaseBranchNotCheckedOut, match="other"):
+        reap_session(sdir, cfg, paths)
+    assert _sha(git, git_repo, "main") == main_before
+    assert _sha(git, git_repo, "other") == other_before
+    assert not (sdir / "reaped.json").exists()
+    assert read_task(paths.tasks_dir / "task-001.md").status == "in-progress"
+    assert _branch_exists(git, git_repo, "task-001")
+    assert (paths.worktrees_dir / "sess-task-001").exists()
+
+    # recovery: check base out again and the same session reaps + merges cleanly
+    git(git_repo, "checkout", "-q", "main")
+    assert reap_session(sdir, cfg, paths) is True
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"
+    assert "feature work" in git(git_repo, "log", "--oneline", "main").stdout
+
+
+def test_auto_merge_halts_on_detached_head(git_repo, git):
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    _worktree_with_commit(paths, git, broken=False)
+    sdir = make_session(paths, "task-001", "COMPLETE", commit="x")
+    git(git_repo, "checkout", "-q", "--detach")
+    main_before, head_before = _sha(git, git_repo, "main"), _sha(git, git_repo, "HEAD")
+
+    with pytest.raises(loop_mod.BaseBranchNotCheckedOut):
+        reap_session(sdir, Config(integration="auto-merge"), paths)
+    assert _sha(git, git_repo, "main") == main_before
+    assert _sha(git, git_repo, "HEAD") == head_before
+
+
+def test_branch_and_pr_modes_ignore_checked_out_branch(git_repo, git):
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    _worktree_with_commit(paths, git, broken=False)
+    sdir = make_session(paths, "task-001", "COMPLETE", commit="x")
+    git(git_repo, "checkout", "-q", "-b", "other")
+
+    assert reap_session(sdir, Config(integration="branch"), paths) is True
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"
 
 
 # ---- follow-up filing -------------------------------------------------------

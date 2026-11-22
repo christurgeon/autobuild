@@ -160,3 +160,33 @@ def test_assert_run_preflight_ignores_warn_level_problems(git_repo, stub_bin):
     # so the run-wiring must not abort on it (run handles base resolution itself).
     preflight.assert_run_preflight(Paths(git_repo),
                                    Config(integration="branch", base_branch="nope"))
+
+
+# --- auto-merge requires base_branch checked out -----------------------------
+
+def test_doctor_fails_when_auto_merge_and_head_not_base(git_repo, stub_bin, monkeypatch,
+                                                        git, capsys):
+    init_committed(git_repo, monkeypatch, integration="auto-merge")
+    git(git_repo, "checkout", "-q", "-b", "other")
+    assert cli.main(["doctor"]) == 1
+    out = capsys.readouterr().out
+    assert "other" in out and "main" in out
+
+
+def test_doctor_base_checkout_check_absent_outside_auto_merge(git_repo, stub_bin, git):
+    git(git_repo, "checkout", "-q", "-b", "other")
+    names = {name for _l, name, _d in preflight.run_checks(Paths(git_repo),
+                                                           Config(integration="branch"))}
+    assert "base checkout" not in names
+
+
+def test_run_refuses_auto_merge_when_head_not_base(git_repo, stub_bin, monkeypatch, git,
+                                                   capsys):
+    paths = init_committed(git_repo, monkeypatch, integration="auto-merge")
+    git(git_repo, "checkout", "-q", "-b", "other")
+    before = {p.name: p.read_text() for p in paths.tasks_dir.glob("*.md")}
+    rc = cli.main(["run"])
+    assert rc == 2
+    assert "preflight failed" in capsys.readouterr().err
+    assert not any(paths.sessions_dir.iterdir())
+    assert {p.name: p.read_text() for p in paths.tasks_dir.glob("*.md")} == before

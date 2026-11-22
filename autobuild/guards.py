@@ -11,7 +11,24 @@ from pathlib import Path
 from .common import _git
 from .paths import Paths
 
-class BaseBranchLeak(RuntimeError):
+class RunHalted(RuntimeError):
+    """Base for every condition that HALTS a run (and a one-shot `reap`): the supervisor
+    kills live sessions, writes a `halted` summary, notifies, and re-raises; the CLI maps
+    it to exit 2. str() is the operator message."""
+
+
+class BaseBranchNotCheckedOut(RunHalted):
+    """auto-merge found the main checkout on a branch other than base_branch (or on a
+    detached HEAD). Raised before the merge, so nothing moved and the session stays
+    reapable once base_branch is checked out again."""
+
+
+class MergeUndoFailed(RunHalted):
+    """A post-merge check failed and autobuild could not undo the merge: base is left on
+    the merge commit. Raised before the task is marked or reaped.json is written."""
+
+
+class BaseBranchLeak(RunHalted):
     """A session advanced base_branch with commit(s) the harness did not create — an
     agent that escaped its worktree and committed onto the live base. Raised by the
     reaper to HALT the run: base is no longer something autobuild controls, so building
