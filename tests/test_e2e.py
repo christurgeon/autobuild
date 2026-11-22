@@ -342,3 +342,133 @@ def test_e2e_run_halts_on_base_leak(git_repo, stub_bin, monkeypatch, git):
     assert leak["base_branch"] == "main" and leak["commits"]
     # no integration merge landed on base (the leak commit is base's tip, not a merge)
     assert "Merge" not in git(git_repo, "log", "-1", "--format=%s", "main").stdout
+
+
+# ---- graceful interrupt (plan D1): Ctrl-C / SIGTERM ---------------------------
+
+def _set_cfg(paths, old, new):
+    cfg = paths.config_file.read_text()
+    assert old in cfg
+    paths.config_file.write_text(cfg.replace(old, new))
+
+
+def _signal_when_ready(paths, n, sigs, gap=0.3, timeout=15.0):
+    """Background thread: once `n` stub sessions are ready (signal handlers installed),
+    send `sigs` to THIS process, `gap` seconds apart. Sends nothing if they never get
+    ready, so a broken run can't deliver a stray SIGINT to pytest itself."""
+    import os
+    import threading
+    import time
+
+    def go():
+        deadline = time.monotonic() + timeout
+        while len(list(paths.sessions_dir.glob("*/stub-ready"))) < n:
+            if time.monotonic() > deadline:
+                return
+            time.sleep(0.02)
+        for i, sig in enumerate(sigs):
+            if i:
+                time.sleep(gap)
+            os.kill(os.getpid(), sig)
+
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    return t
+
+
+def _session_pgids(paths):
+    return [json.loads(m.read_text())["pgid"] for m in paths.sessions_dir.glob("*/meta.json")]
+
+
+def _interrupted_run(git_repo, stub_bin, monkeypatch, sigs, *, n=2, grace=5, **stub_env):
+    """Start a run of `n` sleeping tasks, interrupt it with `sigs`; return
+    (paths, RunInterrupted, elapsed seconds)."""
+    import time
+
+    import pytest
+
+    stub_bin(STUB_SLEEP="30", **stub_env)
+    paths = init_project(git_repo, monkeypatch, integration="auto-merge", max_parallel=n)
+    _set_cfg(paths, "kill_grace_seconds: 20", f"kill_grace_seconds: {grace}")
+    for i in range(1, n + 1):
+        write_task(paths, f"task-00{i}")
+    _signal_when_ready(paths, n, sigs)
+    t0 = time.monotonic()
+    with pytest.raises(loop_mod.RunInterrupted) as ei:
+        loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=0.2)
+    return paths, ei.value, time.monotonic() - t0
+
+
+def test_e2e_sigint_kills_sessions_and_requeues(git_repo, stub_bin, monkeypatch):
+    import os
+    import signal
+
+    import pytest
+
+    from autobuild.retries import retry_count
+
+    before = signal.getsignal(signal.SIGINT)
+    paths, exc, elapsed = _interrupted_run(git_repo, stub_bin, monkeypatch, [signal.SIGINT])
+    assert exc.signum == signal.SIGINT
+    assert elapsed < 15
+    for pgid in _session_pgids(paths):
+        with pytest.raises(ProcessLookupError):
+            os.killpg(pgid, 0)
+    assert statuses(paths) == {"task-001": "todo", "task-002": "todo"}
+    assert retry_count(paths.retries_ledger, "task-001") == 0
+    assert json.loads(paths.run_summary.read_text())["reason"] == "interrupted"
+    with loop_mod.run_lock(paths.run_lock):
+        pass                                            # lock released
+    assert signal.getsignal(signal.SIGINT) is before   # handler restored
+
+
+def test_e2e_second_sigint_forces_kill(git_repo, stub_bin, monkeypatch):
+    import os
+    import signal
+
+    import pytest
+
+    paths, exc, elapsed = _interrupted_run(
+        git_repo, stub_bin, monkeypatch, [signal.SIGINT, signal.SIGINT], grace=10,
+        STUB_IGNORE_SIGTERM="1")
+    assert exc.signum == signal.SIGINT
+    assert elapsed < 8   # well under the 10s grace (first signal waits for stub-ready)
+    for pgid in _session_pgids(paths):
+        with pytest.raises(ProcessLookupError):
+            os.killpg(pgid, 0)
+
+
+def test_e2e_sigterm_behaves_like_sigint(git_repo, stub_bin, monkeypatch):
+    import signal
+
+    paths, exc, _ = _interrupted_run(git_repo, stub_bin, monkeypatch, [signal.SIGTERM])
+    assert exc.signum == signal.SIGTERM
+    assert statuses(paths) == {"task-001": "todo", "task-002": "todo"}
+
+
+def test_e2e_interrupt_then_rerun_drains(git_repo, stub_bin, monkeypatch):
+    import signal
+
+    from autobuild.retries import retry_count
+
+    paths, _, _ = _interrupted_run(git_repo, stub_bin, monkeypatch, [signal.SIGINT])
+    stub_bin(STUB_SLEEP="0")
+    loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=0.05)
+    assert statuses(paths) == {"task-001": "done", "task-002": "done"}
+    assert retry_count(paths.retries_ledger, "task-001") == 0
+
+
+def test_e2e_interrupt_keeps_result_written_during_grace(git_repo, stub_bin, monkeypatch):
+    """A session that writes a real COMPLETE during the shutdown grace keeps it: it is not
+    overwritten with INTERRUPTED, is left reapable, and the next run integrates it."""
+    import signal
+
+    paths, _, _ = _interrupted_run(git_repo, stub_bin, monkeypatch, [signal.SIGINT], n=1,
+                                   STUB_COMPLETE_ON_SIGTERM="1")
+    results = [json.loads(p.read_text()) for p in paths.sessions_dir.glob("*/result.json")]
+    assert [r["status"] for r in results] == ["COMPLETE"]
+    assert not list(paths.sessions_dir.glob("*/reaped.json"))
+    assert statuses(paths) == {"task-001": "in-progress"}
+    stub_bin(STUB_SLEEP="0", STUB_COMPLETE_ON_SIGTERM="0")
+    loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=0.05)
+    assert statuses(paths) == {"task-001": "done"}

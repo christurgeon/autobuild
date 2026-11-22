@@ -186,3 +186,46 @@ def test_reap_cli_exits_2_when_head_moved_off_base(git_repo, git, monkeypatch, c
     assert cli.main(["reap"]) == 2
     assert "other" in capsys.readouterr().err
     assert not (sdir / "reaped.json").exists()
+
+
+def test_cli_run_sigint_exits_130(git_repo, git, stub_bin, monkeypatch):
+    """A real `autobuild run` process given SIGINT shuts down gracefully: exit 130 and
+    no session process group left behind."""
+    import json
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    monkeypatch.chdir(git_repo)
+    cli.main(["init"])
+    paths = Paths(git_repo)
+    for f in paths.tasks_dir.glob("*.md"):
+        f.unlink()
+    (paths.tasks_dir / "task-001.md").write_text(
+        "---\nid: task-001\ntitle: t\nstatus: todo\npriority: 1\ndepends_on: []\n---\n\n"
+        "## Goal\nx\n", encoding="utf-8")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-q", "-m", "scaffold")
+    stub_bin(STUB_SLEEP="30")
+
+    proc = subprocess.Popen([sys.executable, "-m", "autobuild.cli", "run"], cwd=git_repo,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 20
+        while not list(paths.sessions_dir.glob("*/stub-ready")):
+            assert time.monotonic() < deadline, "session never became ready"
+            assert proc.poll() is None, "run exited early"
+            time.sleep(0.05)
+        proc.send_signal(signal.SIGINT)
+        assert proc.wait(timeout=30) == 130
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    for meta in paths.sessions_dir.glob("*/meta.json"):
+        try:
+            os.killpg(json.loads(meta.read_text())["pgid"], 0)
+            raise AssertionError("session process group still alive")
+        except ProcessLookupError:
+            pass

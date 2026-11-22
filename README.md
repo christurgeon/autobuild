@@ -78,6 +78,21 @@ clobber a skill you've edited.
 | `autobuild reap` | One-shot: collect finished sessions, update tasks, open PRs / merge per config. |
 | `autobuild clean` | Remove finished worktrees and stale session dirs. |
 
+### Stopping a run
+
+Press **Ctrl-C once** (or send `SIGTERM`) for a graceful stop: autobuild kills every running
+session (one shared `kill_grace_seconds`), re-queues their tasks to `todo` **without** using
+timeout-retry budget, writes `.autobuild/run-summary.json` (reason `interrupted`), and exits
+130 (SIGINT) or 143 (SIGTERM). A session that already finished keeps its result; the next
+`autobuild run` verifies and integrates it. Press **Ctrl-C again** to skip the grace and kill
+at once; a third Ctrl-C kills autobuild itself (the next `run` recovers the state).
+
+Ctrl-C also reaches checks and `git` commands autobuild runs itself. A check or merge that
+fails during shutdown is left for the next run instead of blocking the task. Two narrow cases
+remain: a Ctrl-C that lands while a session's worktree is being created blocks that task
+("worktree creation failed"), and in `pr` mode a `git push` killed mid-flight marks the task
+`done` with the branch kept locally and no PR.
+
 ## Configuration
 
 Everything lives in `.autobuild/config.yml` — the `model`, `max_parallel`, the `checks` to

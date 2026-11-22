@@ -163,6 +163,9 @@ def main(argv: list[str] | None = None) -> int:
         except loop_mod.RunHalted as e:
             _err(str(e))
             return 2
+        except loop_mod.RunInterrupted as e:
+            _err(f"{e}; sessions stopped and their tasks re-queued")
+            return 128 + e.signum
     elif args.command == "status":
         loop_mod.status(paths, config)
     elif args.command == "reap":

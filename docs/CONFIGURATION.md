@@ -80,7 +80,7 @@ notifier, whatever — nothing is hardcoded into the harness.
 
 | `AUTOBUILD_EVENT` | When it fires | `AUTOBUILD_MESSAGE` |
 |---|---|---|
-| `done` | the run ended (`drained` / `settled` / `max_iterations`) | the terminal reason + per-status task counts |
+| `done` | the run ended (`drained` / `settled` / `max_iterations` / a budget cap / `interrupted` by Ctrl-C or SIGTERM) | the terminal reason + per-status task counts |
 | `halt` | the run **halted** (auto-merge): a session escaped onto `base_branch`, `base_branch` is not checked out, or a failed merge could not be undone | the cause and the branch / session / task |
 | `needs_human` | a session reported `NEEDS_HUMAN` | the task id + its summary |
 

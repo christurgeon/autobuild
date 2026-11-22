@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+from collections.abc import Callable
 from pathlib import Path
 
+from . import interrupt
 from .common import _notify, _now, _read_json, ok, warn
 from .config import Config
 from .guards import BaseBranchLeak, base_leak_commits
@@ -135,17 +137,44 @@ def _handle_timeout(tid: str, sid: str, task, config: Config, paths: Paths) -> b
         count = record_timeout(paths.retries_ledger, tid, sid)  # distinct attempts so far
         if count > config.timeout_max_retries:
             return give_up(f"retries exhausted ({config.timeout_max_retries})")
-        remove_worktree(paths, sid)  # free the branch from its worktree before -D
-        if not delete_branch(paths, tid, force=True):
-            # The branch outlived its worktree removal (a genuine git failure, not a
-            # checkout pin) — don't re-queue onto surviving partial work; the worktree is
-            # already gone, so point the human at the branch to delete by hand.
+        if not _discard_and_requeue(tid, sid, task, paths):
             return give_up(f"could not delete {branch_name(tid)} for a clean retry — "
                            f"delete it by hand to allow a retry")
-        set_status(task.path, "todo")
         warn(f"{sid}: {tid} TIMEOUT — re-queued (attempt {count}/"
              f"{config.timeout_max_retries + 1}); discarded partial {branch_name(tid)}, "
              f"re-forking from base")
+        return True
+
+
+def _discard_and_requeue(tid: str, sid: str, task, paths: Paths) -> bool:
+    """Remove the session's worktree, force-delete its partial branch (so the retry
+    re-forks from base), and set the task `todo`. Caller holds the backlog lock. Returns
+    False, changing no status, if the branch outlived its worktree removal (a genuine git
+    failure, not a checkout pin) — never re-queue onto surviving partial work."""
+    remove_worktree(paths, sid)  # free the branch from its worktree before -D
+    if not delete_branch(paths, tid, force=True):
+        return False
+    set_status(task.path, "todo")
+    return True
+
+
+def _requeue_fresh(tid: str, sid: str, task, paths: Paths, *, label: str) -> bool:
+    """Re-queue a killed session's task WITHOUT touching the timeout-retry ledger — for
+    synthetic statuses that are not the task's fault (INTERRUPTED). Same posture as a
+    timeout re-queue: the killed tree is incomplete and unverified, so it re-forks from
+    base. Under the backlog lock, guarded on the task still being `in-progress`. Returns
+    True iff re-queued."""
+    with backlog_lock(paths.lock_file):
+        current = load_task(task.path)  # tolerant: a corrupted file takes the superseded path
+        if current is None or current.status != "in-progress":
+            return False  # superseded by a concurrent run — nothing to do
+        if not _discard_and_requeue(tid, sid, task, paths):
+            set_status(task.path, "blocked")
+            warn(f"{sid}: {tid} {label} — could not delete {branch_name(tid)} for a clean "
+                 f"retry; blocked — delete the branch by hand, then reset the task to todo")
+            return False
+        warn(f"{sid}: {tid} {label} — re-queued (no retry budget used); discarded partial "
+             f"{branch_name(tid)}")
         return True
 
 
@@ -223,6 +252,8 @@ def _reap_session_locked(sdir: Path, result: dict, config: Config, paths: Paths)
         # Trust, but verify: re-run the checks against the committed tree ourselves
         # before integrating. A tree that fails verification is blocked, not merged.
         verified, checks_outcome = verify_checks(config, paths, sdir, sid)
+        if not verified and interrupt.requested():
+            return _abandon_for_shutdown(sid, tid, f"verification {checks_outcome}")
         if not verified:
             if task:
                 set_status(task.path, "blocked")
@@ -232,6 +263,8 @@ def _reap_session_locked(sdir: Path, result: dict, config: Config, paths: Paths)
             # its self-reported follow-ups are part of the same untrusted output.
         else:
             success, detail = integrate(tid, config, paths, sdir)
+            if not success and interrupt.requested():
+                return _abandon_for_shutdown(sid, tid, f"integration failed ({detail})")
             if success:
                 if task:
                     set_status(task.path, "done")
@@ -262,6 +295,14 @@ def _reap_session_locked(sdir: Path, result: dict, config: Config, paths: Paths)
             # No task file (deleted/renamed mid-flight) — still reaped by the shared tail,
             # but log it so a timed-out session never vanishes without a diagnostic.
             warn(f"{sid}: {tid} TIMEOUT — task file not found; reaped without retry")
+    elif status == "INTERRUPTED":
+        # Killed by an operator signal (or a halt): like TIMEOUT never integrated, verified,
+        # or given follow-ups — but re-queued WITHOUT a retries.json entry, so an interrupt
+        # never spends timeout budget.
+        if task:
+            requeued = _requeue_fresh(tid, sid, task, paths, label="INTERRUPTED")
+        else:
+            warn(f"{sid}: {tid} INTERRUPTED — task file not found; reaped without retry")
     else:
         warn(f"{sid}: unrecognized status '{status}'")
         return False
@@ -280,11 +321,25 @@ def _reap_session_locked(sdir: Path, result: dict, config: Config, paths: Paths)
     return True
 
 
-def reap_all(config: Config, paths: Paths) -> int:
+def _abandon_for_shutdown(sid: str, tid: str, why: str) -> bool:
+    """A COMPLETE reap that failed while a shutdown is in progress: the failure is likely
+    the terminal SIGINT hitting the check or git child, not the work. Change nothing and
+    write no reaped.json, so the next run re-verifies and re-integrates from the intact
+    result.json (integrate's failure paths already restored base)."""
+    warn(f"{sid}: {tid} {why} during shutdown — left for the next run")
+    return False
+
+
+def reap_all(config: Config, paths: Paths,
+             should_stop: Callable[[], bool] = lambda: False) -> int:
+    """Reap every finished session. `should_stop()` is checked before each one; True
+    stops early and leaves the rest reapable (a shutdown is in progress)."""
     n = 0
     if not paths.sessions_dir.is_dir():
         return 0
     for sdir in sorted(paths.sessions_dir.iterdir()):
+        if should_stop():
+            break
         if sdir.is_dir() and reap_session(sdir, config, paths):
             n += 1
     return n

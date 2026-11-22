@@ -58,8 +58,8 @@ class Config:
                                       # (0 = block on first timeout). Each retry
                                       # re-spends task_timeout_seconds.
     # --- operator notifications ----------------------------------------------
-    notify_command: str = ""  # shell command run on coarse run events (done / halt /
-                              # needs_human); "" disables notifications entirely.
+    notify_command: str = ""  # shell command run on coarse run events (done — incl. reason
+                              # `interrupted` — / halt / needs_human); "" disables them.
 
 
 # Top-level keys autobuild understands. Anything else is a likely typo and warned.
