@@ -100,14 +100,17 @@ timeout_max_retries: 2        # integer >= 0: auto-retries for a timed-out task 
 # Generic, mechanism-agnostic hook: autobuild runs this shell command on the COARSE
 # run-level events worth knowing about while you're away. "" (the default) disables it.
 # The event type and message are passed as environment variables:
-#   AUTOBUILD_EVENT    one of: done | halt | needs_human
+#   AUTOBUILD_EVENT    one of: done | halt | needs_human | rate_limited
 #   AUTOBUILD_MESSAGE  a short human-readable summary of the event
 # Events (low-volume by design — run-level + NEEDS_HUMAN, never per-task-success):
 #   done         the run ended (drained / settled / max_iterations / a budget cap /
-#                interrupted by Ctrl-C or SIGTERM); message has the reason + counts
+#                rate_limited / interrupted by Ctrl-C or SIGTERM); message has the
+#                reason + counts
 #   halt         the run HALTED (auto-merge): a session escaped onto base_branch, base_branch
 #                is not checked out, or a failed merge could not be undone
 #   needs_human  a session reported NEEDS_HUMAN (names the task)
+#   rate_limited a session hit a usage/rate limit (once per run); the run stops claiming
+#                new work, re-queues the task, and ends with reason rate_limited
 # It is best-effort: bounded by a timeout and ALL failures are swallowed (warned), so a
 # broken notifier never breaks a run. The command is a shell you control, NOT a security
 # boundary. Example (Telegram via curl):

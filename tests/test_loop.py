@@ -2183,3 +2183,81 @@ def test_supervise_interrupt_stops_spawning_and_unclaims(git_repo, monkeypatch):
     st = {t: read_task(paths.tasks_dir / f"{t}.md").status
           for t in ("task-001", "task-002", "task-003")}
     assert st == {"task-001": "claimed", "task-002": "todo", "task-003": "todo"}
+
+
+# ---- usage / rate limits (plan D2): RATE_LIMITED re-queue -------------------
+
+_REJECTED = ('{"type":"rate_limit_event","rate_limit_info":{"status":"rejected",'
+             '"resetsAt":1764000000,"rateLimitType":"five_hour"}}\n')
+
+
+def _limited_session(paths, tid="task-001"):
+    """An in-progress task whose session dir has meta.json and a session.out that ENDS in
+    a rejected rate_limit_event, but no result.json."""
+    add_task(paths, tid, status="in-progress")
+    sid = f"sess-{tid}"
+    sdir = paths.sessions_dir / sid
+    sdir.mkdir(parents=True)
+    (sdir / "meta.json").write_text(json.dumps({"task": tid, "branch": f"autobuild/{tid}"}))
+    (sdir / "session.out").write_text('{"type":"assistant","message":{}}\n' + _REJECTED)
+    return sid, sdir
+
+
+def test_harvest_exited_rate_limited_writes_rate_limited_not_blocked(git_repo):
+    paths = setup(git_repo)
+    sid, sdir = _limited_session(paths)
+    rs = RunningSession(sid, "task-001", sdir, paths.worktrees_dir / sid, None, _Exited(1))
+    assert loop_mod._harvest([rs], Config(integration="branch"), paths) == []
+    result = json.loads((sdir / "result.json").read_text())
+    assert result["status"] == "RATE_LIMITED" and "five_hour" in result["summary"]
+    assert read_task(paths.tasks_dir / "task-001.md").status == "todo"
+
+
+def test_harvest_deadline_kill_with_limit_writes_rate_limited_not_timeout(git_repo, stub_bin):
+    paths = setup(git_repo)
+    rs = _spawn_real(paths, stub_bin, STUB_SLEEP="30")
+    _await_ready(rs.sdir)
+    with open(rs.sdir / "session.out", "a") as fh:
+        fh.write(_REJECTED)
+    rs.deadline = time.monotonic() - 1
+    assert loop_mod._harvest([rs], Config(integration="branch", kill_grace_seconds=1),
+                             paths) == []
+    assert json.loads((rs.sdir / "result.json").read_text())["status"] == "RATE_LIMITED"
+    assert read_task(paths.tasks_dir / "task-001.md").status == "todo"
+    assert retry_count(paths.retries_ledger, "task-001") == 0
+
+
+def test_reap_rate_limited_requeues_without_consuming_timeout_budget(git_repo, git):
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    wt = make_worktree(paths, "sess-task-001", "task-001", "main")
+    (wt / "partial.txt").write_text("half-done")
+    git(wt, "add", "-A")
+    git(wt, "commit", "-q", "-m", "partial work")
+    sdir = make_session(paths, "task-001", "RATE_LIMITED", summary="usage limit")
+    assert reap_session(sdir, Config(integration="branch"), paths) is True
+    assert read_task(paths.tasks_dir / "task-001.md").status == "todo"
+    assert retry_count(paths.retries_ledger, "task-001") == 0
+    assert not _branch_exists(git, git_repo, "task-001")
+    assert json.loads((sdir / "reaped.json").read_text())["requeued"] is True
+
+
+def test_reap_rate_limited_is_idempotent(git_repo):
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    sdir = make_session(paths, "task-001", "RATE_LIMITED")
+    cfg = Config(integration="branch")
+    assert reap_session(sdir, cfg, paths) is True
+    set_status(paths.tasks_dir / "task-001.md", "in-progress")  # e.g. re-claimed since
+    assert reap_session(sdir, cfg, paths) is False
+    assert read_task(paths.tasks_dir / "task-001.md").status == "in-progress"
+
+
+def test_reconcile_orphan_with_limit_evidence_becomes_rate_limited(git_repo):
+    paths = setup(git_repo)
+    _, sdir = _limited_session(paths)
+    reconcile(paths, sweep_in_progress=True)
+    assert json.loads((sdir / "result.json").read_text())["status"] == "RATE_LIMITED"
+    reap_all(Config(integration="branch"), paths)
+    assert read_task(paths.tasks_dir / "task-001.md").status == "todo"
+    assert retry_count(paths.retries_ledger, "task-001") == 0

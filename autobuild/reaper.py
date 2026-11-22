@@ -160,7 +160,7 @@ def _discard_and_requeue(tid: str, sid: str, task, paths: Paths) -> bool:
 
 def _requeue_fresh(tid: str, sid: str, task, paths: Paths, *, label: str) -> bool:
     """Re-queue a killed session's task WITHOUT touching the timeout-retry ledger — for
-    synthetic statuses that are not the task's fault (INTERRUPTED). Same posture as a
+    synthetic statuses that are not the task's fault (INTERRUPTED, RATE_LIMITED). Same posture as a
     timeout re-queue: the killed tree is incomplete and unverified, so it re-forks from
     base. Under the backlog lock, guarded on the task still being `in-progress`. Returns
     True iff re-queued."""
@@ -295,14 +295,15 @@ def _reap_session_locked(sdir: Path, result: dict, config: Config, paths: Paths)
             # No task file (deleted/renamed mid-flight) — still reaped by the shared tail,
             # but log it so a timed-out session never vanishes without a diagnostic.
             warn(f"{sid}: {tid} TIMEOUT — task file not found; reaped without retry")
-    elif status == "INTERRUPTED":
-        # Killed by an operator signal (or a halt): like TIMEOUT never integrated, verified,
-        # or given follow-ups — but re-queued WITHOUT a retries.json entry, so an interrupt
-        # never spends timeout budget.
+    elif status in ("INTERRUPTED", "RATE_LIMITED"):
+        # Killed by an operator signal / a halt, or stopped by a usage/rate limit: neither is
+        # the task's fault. Like TIMEOUT never integrated, verified, or given follow-ups —
+        # but re-queued WITHOUT a retries.json entry, so it never spends timeout budget.
+        # (RATE_LIMITED needs no budget of its own: the run stops claiming on the first one.)
         if task:
-            requeued = _requeue_fresh(tid, sid, task, paths, label="INTERRUPTED")
+            requeued = _requeue_fresh(tid, sid, task, paths, label=status)
         else:
-            warn(f"{sid}: {tid} INTERRUPTED — task file not found; reaped without retry")
+            warn(f"{sid}: {tid} {status} — task file not found; reaped without retry")
     else:
         warn(f"{sid}: unrecognized status '{status}'")
         return False
