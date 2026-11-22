@@ -192,3 +192,76 @@ def test_create_task_file_empty_slug_falls_back_to_id(tmp_path):
     tasks_dir.mkdir()
     p = create_task_file(tasks_dir, "task-005", "！！！", priority=3)
     assert p.name == "task-005.md"
+
+
+# ---- malformed task files never crash the backlog read ----------------------
+
+MALFORMED = "---\nid: task-002\ntitle: [unclosed\nstatus: todo\n---\n"
+
+
+def test_load_task_yaml_error_yields_invalid_pseudo_task(tmp_path):
+    t = tasks.load_task(write(tmp_path, "task-002.md", MALFORMED))
+    assert t.status == "invalid"
+    assert t.id == "task-002"  # recovered from the id: line
+    assert "line" in t.error
+
+
+@pytest.mark.parametrize("body", [
+    "---\nid: task-003\nstatus: todo\n",                 # block never closes
+    "---\nid: task-003\ntitle: t\n---\n",                # no status: line
+    "---\n- a\n- b\n---\n",                              # frontmatter is a list
+    b"---\nid: task-003\nstatus: todo\n---\n\xff\xfe\n",  # non-UTF-8 bytes
+])
+def test_load_task_unclaimable_file_is_invalid(tmp_path, body):
+    p = tmp_path / "task-003.md"
+    if isinstance(body, bytes):
+        p.write_bytes(body)
+    else:
+        p.write_text(body, encoding="utf-8")
+    t = tasks.load_task(p)
+    assert t is not None and t.status == "invalid"
+    assert t.id == "task-003"
+
+
+def test_load_task_ignores_file_without_frontmatter(tmp_path):
+    p = write(tmp_path, "README.md", "# Backlog notes\n")
+    assert tasks.load_task(p) is None
+    write(tmp_path, "task-001.md", "---\nid: task-001\nstatus: todo\n---\n")
+    assert [t.id for t in iter_tasks(tmp_path)] == ["task-001"]
+
+
+def test_load_task_unrecoverable_id_falls_back_to_stem(tmp_path):
+    t = tasks.load_task(write(tmp_path, "task-077-x.md", "---\ntitle: [bad\nstatus: todo\n---\n"))
+    assert t.status == "invalid"
+    assert t.id == "task-077-x"
+
+
+def test_iter_tasks_tolerates_malformed_and_vanished_files(tmp_path, monkeypatch):
+    write(tmp_path, "task-001.md", "---\nid: task-001\nstatus: todo\n---\n")
+    write(tmp_path, "task-002.md", MALFORMED)
+    gone = write(tmp_path, "task-003.md", "---\nid: task-003\nstatus: todo\n---\n")
+    real = type(gone).read_text
+
+    def flaky(self, *a, **kw):
+        if self.name == "task-003.md":
+            raise FileNotFoundError(self)
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(type(gone), "read_text", flaky)
+    assert [t.status for t in iter_tasks(tmp_path)] == ["todo", "invalid"]
+
+
+def test_index_tasks_first_file_wins_and_duplicate_ids_lists_all_paths(tmp_path):
+    a = write(tmp_path, "a.md", "---\nid: task-001\ntitle: A\nstatus: todo\n---\n")
+    b = write(tmp_path, "b.md", "---\nid: task-001\ntitle: B\nstatus: done\n---\n")
+    write(tmp_path, "c.md", "---\nid: task-002\nstatus: todo\n---\n")
+    ts = iter_tasks(tmp_path)
+    assert tasks.index_tasks(ts)["task-001"].title == "A"
+    assert task_index(tmp_path)["task-001"].path == a
+    assert tasks.duplicate_ids(ts) == {"task-001": [a, b]}
+
+
+def test_next_task_id_reserves_invalid_file_id(tmp_path):
+    write(tmp_path, "task-001.md", "---\nid: task-001\nstatus: done\n---\n")
+    write(tmp_path, "task-009.md", "---\nid: task-009\ntitle: [bad\nstatus: todo\n---\n")
+    assert next_task_id(tmp_path) == "task-010"

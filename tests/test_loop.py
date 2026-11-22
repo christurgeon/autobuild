@@ -238,6 +238,40 @@ def test_reap_finds_task_when_filename_differs_from_id(git_repo):
     assert read_task(p).status == "blocked"
 
 
+MALFORMED_TASK = "---\nid: task-002\ntitle: [unclosed\nstatus: todo\n---\n"
+
+
+def test_reap_defers_while_task_file_invalid(git_repo):
+    paths = setup(git_repo)
+    p = add_task(paths, "task-001")
+    good = p.read_text()
+    sdir = make_session(paths, "task-001", "COMPLETE")
+    p.write_text(good.replace("title: task-001", "title: [unclosed"))
+    broken = p.read_bytes()
+    cfg = Config(integration="branch")
+    assert reap_session(sdir, cfg, paths) is False
+    assert not (sdir / "reaped.json").exists()
+    assert p.read_bytes() == broken
+    p.write_text(good)  # the human fixes the file; the next pass reaps normally
+    assert reap_session(sdir, cfg, paths) is True
+    assert read_task(p).status == "done"
+
+
+def test_reap_defers_on_duplicate_task_id(git_repo):
+    paths = setup(git_repo)
+    p = add_task(paths, "task-001")
+    dup = paths.tasks_dir / "task-001-copy.md"
+    dup.write_text(p.read_text())
+    sdir = make_session(paths, "task-001", "COMPLETE")
+    cfg = Config(integration="branch")
+    assert reap_session(sdir, cfg, paths) is False
+    assert not (sdir / "reaped.json").exists()
+    assert read_task(p).status == "in-progress" and read_task(dup).status == "in-progress"
+    dup.unlink()
+    assert reap_session(sdir, cfg, paths) is True
+    assert read_task(p).status == "done"
+
+
 # ---- integration ------------------------------------------------------------
 
 def test_reap_complete_auto_merge_lands_on_base(git_repo, git):
@@ -1322,6 +1356,15 @@ def test_collect_status_stuck_empty_when_none(git_repo):
     paths = setup(git_repo)
     add_task(paths, "task-001", status="todo")
     assert collect_status(paths)["stuck"] == []
+
+
+def test_collect_status_tolerates_malformed_task_file(git_repo):
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="todo")
+    (paths.tasks_dir / "task-002.md").write_text(MALFORMED_TASK, encoding="utf-8")
+    report = collect_status(paths)
+    assert report["counts"]["invalid"] == 1
+    assert [s["task"] for s in report["stuck"]] == ["task-002"]
 
 
 def test_status_prints_stuck_section_when_present(git_repo, capsys):

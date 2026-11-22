@@ -14,7 +14,15 @@ import fcntl
 from pathlib import Path
 
 from .paths import Paths
-from .tasks import Task, is_terminal, iter_tasks, set_status
+from .tasks import (
+    INVALID,
+    Task,
+    duplicate_ids,
+    index_tasks,
+    is_terminal,
+    iter_tasks,
+    set_status,
+)
 
 
 @contextlib.contextmanager
@@ -38,7 +46,12 @@ def deps_satisfied(task: Task, index: dict[str, Task]) -> bool:
 
 
 def runnable_tasks(tasks: list[Task], index: dict[str, Task]) -> list[Task]:
-    runnable = [t for t in tasks if t.status == "todo" and deps_satisfied(t, index)]
+    # A duplicated id is never schedulable, and neither is a dependent of one (even if
+    # every copy is `done`): which copy is real is a human decision, so don't guess.
+    dups = duplicate_ids(tasks)
+    runnable = [t for t in tasks
+                if t.status == "todo" and t.id not in dups
+                and not any(d in dups for d in t.depends_on) and deps_satisfied(t, index)]
     return sorted(runnable, key=lambda t: (t.priority, t.id))
 
 
@@ -53,6 +66,11 @@ def stuck_tasks(tasks: list[Task], index: dict[str, Task]) -> dict[str, str]:
       `blocked` (a terminal, non-`done` state).
     - ``dependency-cycle: <id -> ... -> id>`` — the task depends, directly or
       transitively, on a cycle; no member can complete.
+    - ``duplicate-id: <id> (<a.md>, <b.md>)`` — more than one file declares the task's
+      own id; no copy is ever scheduled.
+    - ``invalid-task-file: <name.md> (<error>)`` — the task's own file is INVALID.
+    - ``duplicate-dependency: <id>`` / ``invalid-dependency: <id>`` — a (transitive)
+      dependency id is duplicated, or resolves to an INVALID file.
 
     A blocked dep is reported by its root id even when reached transitively, so a
     long todo chain behind one blocked task all names that task. Cycle detection
@@ -64,9 +82,13 @@ def stuck_tasks(tasks: list[Task], index: dict[str, Task]) -> dict[str, str]:
         if tid in path:  # a back-edge into the current stack — a cycle
             cycle = path[path.index(tid):] + [tid]
             return f"dependency-cycle: {' -> '.join(cycle)}"
+        if tid in dups:
+            return f"duplicate-dependency: {tid}"
         task = index.get(tid)
         if task is None:
             return f"missing-dependency: {tid}"
+        if task.status == INVALID:
+            return f"invalid-dependency: {tid}"
         if task.status == "done":
             return None
         if task.status == "blocked":
@@ -86,10 +108,18 @@ def stuck_tasks(tasks: list[Task], index: dict[str, Task]) -> dict[str, str]:
         finally:
             path.pop()
 
+    dups = duplicate_ids(tasks)
     stuck: dict[str, str] = {}
     for t in tasks:
         if is_terminal(t.status):
             continue  # terminal: a cause of stuckness, never itself stuck
+        if t.id in dups:
+            names = ", ".join(p.name for p in dups[t.id])
+            stuck[t.id] = f"duplicate-id: {t.id} ({names})"
+            continue
+        if t.status == INVALID:
+            stuck[t.id] = f"invalid-task-file: {t.path.name} ({t.error})"
+            continue
         reason = blocker(t.id, [])
         if reason is not None:
             stuck[t.id] = reason
@@ -103,7 +133,7 @@ def claim_tasks(n: int, paths: Paths) -> list[Task]:
     claimed: list[Task] = []
     with backlog_lock(paths.lock_file):
         tasks = iter_tasks(paths.tasks_dir)
-        index = {t.id: t for t in tasks}
+        index = index_tasks(tasks)
         for t in runnable_tasks(tasks, index):
             if len(claimed) >= n:
                 break

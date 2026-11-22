@@ -21,7 +21,7 @@ from .reconcile import reconcile
 from .report import _finish_run, status
 from .scheduler import claim_tasks, runnable_tasks, stuck_tasks
 from .session import RunningSession, spawn_session, write_sentinel_if_absent
-from .tasks import is_terminal, iter_tasks
+from .tasks import index_tasks, is_terminal, iter_tasks
 
 # --- outer loop --------------------------------------------------------------
 
@@ -224,7 +224,7 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession],
 
         if not running:
             tasks = iter_tasks(paths.tasks_dir)
-            index = {t.id: t for t in tasks}
+            index = index_tasks(tasks)
             # A reap in this pass can create newly-runnable work with nothing left running
             # to trigger the next claim — most notably a timeout RE-QUEUE flipping a task
             # back to `todo`. Loop back and claim it instead of settling prematurely (which

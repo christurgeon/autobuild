@@ -43,6 +43,15 @@ in files and git — read it before proposing anything.
      preserved until a retry re-forks from base — on a settled-without-retry run it's still
      there to inspect; `progress.log` usually shows what ate the budget).
    - **needs a human decision** (NEEDS_HUMAN).
+   - **broken task file** — STUCK says `invalid-task-file: <file> (<error>)` (the file starts
+     with `---` but its frontmatter does not parse, does not close, is not a mapping, or has
+     no `status:` line) or `invalid-dependency: <id>` (a dependency's file is invalid). Fix
+     the named line in the file. `duplicate-id: <id> (<a.md>, <b.md>)` or
+     `duplicate-dependency: <id>` means two files declare the same `id`; give one a new id
+     (and fix any `depends_on` that meant it). A file with no frontmatter is ignored, not
+     invalid; `autobuild doctor` lists both. If a session finished while its file was broken
+     or duplicated, its reap was deferred; it finishes on the next `run` or `autobuild reap`
+     after the fix.
    - **base leak** (`<id>/leak.json` present) — the session committed onto `base_branch`
      instead of its own branch; `leak.json` lists the offending `commits`. In `auto-merge`
      this halts the run (`BaseBranchLeak`, exit 2) and re-fires every run until base is

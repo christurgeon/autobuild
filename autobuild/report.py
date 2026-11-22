@@ -15,7 +15,7 @@ from .progress import read_progress
 from .retries import retry_count
 from .scheduler import stuck_tasks
 from .session import _atomic_write_json
-from .tasks import iter_tasks
+from .tasks import index_tasks, iter_tasks
 from .worktree import prune_worktrees
 
 # --- status ------------------------------------------------------------------
@@ -26,7 +26,7 @@ def collect_status(paths: Paths) -> dict:
     for t in tasks:
         counts[t.status] = counts.get(t.status, 0) + 1
 
-    stuck = stuck_tasks(tasks, {t.id: t for t in tasks})
+    stuck = stuck_tasks(tasks, index_tasks(tasks))
     stuck_list = [{"task": tid, "reason": stuck[tid]} for tid in sorted(stuck)]
 
     sessions = []

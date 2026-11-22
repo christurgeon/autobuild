@@ -180,6 +180,23 @@ def test_e2e_run_end_reports_complete_on_clean_drain(git_repo, stub_bin, monkeyp
     assert "cannot proceed" not in out
 
 
+def test_e2e_malformed_task_file_settles_not_crashes(git_repo, stub_bin, monkeypatch, capsys):
+    stub_bin()
+    paths = init_project(git_repo, monkeypatch, integration="branch")
+    write_task(paths, "task-001")
+    bad = paths.tasks_dir / "task-002.md"
+    bad.write_text("---\nid: task-002\ntitle: [unclosed\nstatus: todo\n---\n", encoding="utf-8")
+    before = bad.read_bytes()
+    (paths.tasks_dir / "README.md").write_text("# Backlog notes\n", encoding="utf-8")
+
+    loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=5)
+
+    assert json.loads(paths.run_summary.read_text())["reason"] == "settled"
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"
+    assert bad.read_bytes() == before
+    assert "invalid-task-file" in capsys.readouterr().out
+
+
 def test_e2e_followup_filed_through_spawn_and_reap(git_repo, stub_bin, monkeypatch):
     stub_bin(STUB_FOLLOWUPS=json.dumps([{"title": "discovered work", "priority": 2}]))
     paths = init_project(git_repo, monkeypatch, integration="branch")

@@ -22,6 +22,7 @@ from .common import _git, current_branch, log, ok, warn
 from .config import Config
 from .guards import dirty_base_paths
 from .paths import Paths
+from .tasks import INVALID, duplicate_ids, iter_tasks
 
 PASS = "PASS"
 WARN = "WARN"
@@ -138,6 +139,30 @@ def _check_disk(paths: Paths, config: Config) -> CheckResult:
             f"parallel worktrees of a large repo can exhaust it")
 
 
+def _check_task_files(paths: Paths, config: Config) -> CheckResult:
+    # WARN only: `run` tolerates these (an invalid or duplicated task settles, the rest of
+    # the backlog drains). This is the one place that names a duplicate whose copies are
+    # all `done` and the ignored non-task files.
+    tasks = iter_tasks(paths.tasks_dir)
+    seen = {t.path for t in tasks}
+    ignored = sorted(p.name for p in paths.tasks_dir.glob("*.md") if p not in seen)
+    tail = f"; ignored non-task file(s): {', '.join(ignored)}" if ignored else ""
+    invalid = [f"{t.path.name} ({t.error})" for t in tasks if t.status == INVALID]
+    dups = [f"{tid} ({', '.join(p.name for p in ps)})"
+            for tid, ps in sorted(duplicate_ids(tasks).items())]
+    if not invalid and not dups:
+        return (PASS, "task files", f"{len(tasks)} task file(s) parse cleanly{tail}")
+    parts = []
+    if invalid:
+        parts.append(f"invalid: {'; '.join(invalid[:3])}"
+                     + (f" (+{len(invalid) - 3} more)" if len(invalid) > 3 else ""))
+    if dups:
+        parts.append(f"duplicate id(s): {'; '.join(dups[:3])}"
+                     + (f" (+{len(dups) - 3} more)" if len(dups) > 3 else ""))
+    return (WARN, "task files",
+            f"{' | '.join(parts)} — never scheduled until fixed{tail}")
+
+
 # The full check suite, in report order. Critical (FAIL-level) checks are also the
 # subset wired into `run()` — see CRITICAL_CHECKS.
 _CHECKS = (
@@ -149,6 +174,7 @@ _CHECKS = (
     _check_base_clean,
     _check_gh,
     _check_disk,
+    _check_task_files,
 )
 
 # The subset `run()` enforces early (before claiming/spawning): a session genuinely

@@ -16,7 +16,16 @@ from .paths import Paths
 from .retries import clear_retries, record_timeout
 from .scheduler import backlog_lock
 from .session import RunningSession, _atomic_write_json, write_sentinel_if_absent
-from .tasks import create_task_file, next_task_id, read_task, set_status, task_index
+from .tasks import (
+    INVALID,
+    create_task_file,
+    duplicate_ids,
+    index_tasks,
+    iter_tasks,
+    load_task,
+    next_task_id,
+    set_status,
+)
 from .verify import verify_checks
 from .worktree import branch_name, delete_branch, remove_worktree
 
@@ -118,7 +127,10 @@ def _handle_timeout(tid: str, sid: str, task, config: Config, paths: Paths) -> b
         return False
 
     with backlog_lock(paths.lock_file):
-        if read_task(task.path).status != "in-progress":
+        # load_task, not read_task: a file a human corrupted since the reaper's guard reads
+        # as INVALID (not in-progress) and takes this superseded path instead of crashing.
+        current = load_task(task.path)
+        if current is None or current.status != "in-progress":
             return False  # superseded by a concurrent run — nothing to do
         count = record_timeout(paths.retries_ledger, tid, sid)  # distinct attempts so far
         if count > config.timeout_max_retries:
@@ -143,7 +155,12 @@ def _reap_session_locked(sdir: Path, result: dict, config: Config, paths: Paths)
     tid = str(result.get("task", ""))
     status = str(result.get("status", ""))
     sid = sdir.name
-    task = task_index(paths.tasks_dir).get(tid)
+    tasks = iter_tasks(paths.tasks_dir)
+    task = index_tasks(tasks).get(tid)
+    dup_paths = duplicate_ids(tasks).get(tid)
+    # A duplicated id or an INVALID file can't be acted on safely (which file? no status
+    # line to write?). Defer: the next reap pass after the human fixes the file finishes it.
+    unresolvable = bool(dup_paths) or (task is not None and task.status == INVALID)
     integrated = False
     requeued = False
     followups: list[str] = []
@@ -166,7 +183,7 @@ def _reap_session_locked(sdir: Path, result: dict, config: Config, paths: Paths)
     base_branch = str(meta.get("base_branch") or config.base_branch)
     leaks = base_leak_commits(paths, base_branch, str(meta.get("base_sha", "")))
     if leaks:
-        if task:
+        if task and not unresolvable:
             set_status(task.path, "blocked")
         _atomic_write_json(sdir / "leak.json",
                            {"detected_at": _now(), "task": tid, "base_branch": base_branch,
@@ -194,6 +211,13 @@ def _reap_session_locked(sdir: Path, result: dict, config: Config, paths: Paths)
                             "requeued": False, "checks": "n/a", "followups": [],
                             "leak": leaks})
         return True
+
+    if unresolvable:
+        why = (f"id declared by {', '.join(p.name for p in dup_paths)}" if dup_paths
+               else f"{task.path.name} is invalid ({task.error})")
+        warn(f"{sid}: {tid} {status} — reap deferred: {why}; fix the task file and the "
+             f"next pass (or `autobuild reap`) finishes it")
+        return False
 
     if status == "COMPLETE":
         # Trust, but verify: re-run the checks against the committed tree ourselves

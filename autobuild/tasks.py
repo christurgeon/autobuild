@@ -21,6 +21,10 @@ DEFAULT_PRIORITY = 999  # missing/invalid priority sorts last; never silently pr
 # has exhausted its automatic retries (timeout_max_retries) — a settled failure, distinct
 # from `blocked` so a human can tell "ran out of time" from "agent hit a wall".
 TERMINAL = frozenset({"done", "blocked", "timeout"})
+# In-memory pseudo-status for a task file that starts with `---` but cannot be safely
+# scheduled (YAML error, unclosed block, non-mapping, no `status:` line, undecodable).
+# Never written to disk; non-terminal, so the backlog settles instead of draining.
+INVALID = "invalid"
 
 # frontmatter is the leading `---\n ... \n---\n` block; group(1) is its body.
 _FM_RE = re.compile(r"\A---\n(.*?\n)---\n", re.DOTALL)
@@ -30,6 +34,8 @@ _STATUS_LINE_RE = re.compile(
     re.MULTILINE,
 )
 _ID_NUM_RE = re.compile(r"task-0*(\d+)")
+# best-effort id recovery from an unparseable file, so a broken task keeps its identity.
+_ID_LINE_RE = re.compile(r"""^id:[ \t]*["']?([^\s"'#]+)""", re.MULTILINE)
 
 
 @dataclass
@@ -40,6 +46,7 @@ class Task:
     priority: int
     depends_on: list[str]
     path: Path
+    error: str | None = None  # why the file is INVALID; None for a valid task
 
 
 # ---- reading ----------------------------------------------------------------
@@ -70,7 +77,10 @@ def _coerce_deps(value) -> list[str]:
 
 
 def read_task(path: Path) -> Task:
-    data = parse_frontmatter(path.read_text(encoding="utf-8"))
+    return _task_from(parse_frontmatter(path.read_text(encoding="utf-8")), path)
+
+
+def _task_from(data: dict, path: Path) -> Task:
     return Task(
         id=str(data.get("id") or path.stem),
         title=str(data.get("title", "")),
@@ -81,14 +91,85 @@ def read_task(path: Path) -> Task:
     )
 
 
+def _recover_id(text: str, path: Path) -> str:
+    m = _FM_RE.match(text)
+    found = _ID_LINE_RE.search(m.group(1) if m else text)
+    return found.group(1) if found else path.stem
+
+
+def _describe_yaml_error(exc: yaml.YAMLError) -> str:
+    mark = getattr(exc, "problem_mark", None)
+    if mark is not None:
+        # +2: the mark is 0-based within the block, which starts after the `---` line
+        problem = getattr(exc, "problem", None) or "YAML error"
+        return f"{problem} at line {mark.line + 2}, column {mark.column + 1}"
+    return (str(exc).splitlines() or ["YAML error"])[0]
+
+
+def load_task(path: Path) -> Task | None:
+    """Read a task file without ever raising for a malformed or vanished file.
+
+    Returns None for a file that vanished mid-scan or does not start with `---` (not a
+    task, e.g. a tasks/README.md). A file that starts with `---` but cannot be safely
+    scheduled becomes an INVALID pseudo-task (id recovered from its `id:` line, else the
+    file stem) carrying the reason in `error`."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except UnicodeDecodeError as e:
+        try:
+            raw = path.read_bytes().decode("utf-8", errors="replace")
+        except FileNotFoundError:
+            return None
+        return _invalid(raw, path, f"not valid UTF-8 (byte {e.start})")
+    if not text.startswith("---"):
+        return None
+    m = _FM_RE.match(text)
+    if not m:
+        return _invalid(text, path, "frontmatter block does not close with ---")
+    try:
+        data = yaml.safe_load(m.group(1))
+    except yaml.YAMLError as e:
+        return _invalid(text, path, _describe_yaml_error(e))
+    if not isinstance(data, dict):
+        return _invalid(text, path, "frontmatter is not a mapping")
+    if not _STATUS_LINE_RE.search(m.group(1)):
+        return _invalid(text, path, "no status: line in frontmatter")
+    return _task_from(data, path)
+
+
+def _invalid(text: str, path: Path, error: str) -> Task:
+    return Task(id=_recover_id(text, path), title="", status=INVALID,
+                priority=DEFAULT_PRIORITY, depends_on=[], path=path, error=error)
+
+
 def iter_tasks(tasks_dir: Path) -> list[Task]:
     if not tasks_dir.is_dir():
         return []
-    return [read_task(p) for p in sorted(tasks_dir.glob("*.md"))]
+    loaded = (load_task(p) for p in sorted(tasks_dir.glob("*.md")))
+    return [t for t in loaded if t is not None]
+
+
+def index_tasks(tasks: list[Task]) -> dict[str, Task]:
+    """id -> Task. On a duplicate id the FIRST file in sorted-path order wins; callers
+    that act on a task must check `duplicate_ids` first (the scheduler and reaper do)."""
+    index: dict[str, Task] = {}
+    for t in tasks:
+        index.setdefault(t.id, t)
+    return index
 
 
 def task_index(tasks_dir: Path) -> dict[str, Task]:
-    return {t.id: t for t in iter_tasks(tasks_dir)}
+    return index_tasks(iter_tasks(tasks_dir))
+
+
+def duplicate_ids(tasks: list[Task]) -> dict[str, list[Path]]:
+    """Every id declared by more than one file, mapped to all of its paths."""
+    by_id: dict[str, list[Path]] = {}
+    for t in tasks:
+        by_id.setdefault(t.id, []).append(t.path)
+    return {tid: ps for tid, ps in by_id.items() if len(ps) > 1}
 
 
 def is_terminal(status: str) -> bool:
