@@ -7,15 +7,22 @@ the [README](../README.md); this is the deeper tour.
 
 ```
 GOAL.md            <- you write this. The north star. Rarely changes.
-CLAUDE.md          <- the contract every session obeys (plan->review->implement).
 tasks/             <- one .md per task. Humans own it; agents append follow-ups.
   task-001-*.md
 .autobuild/        <- machine state. Safe to delete; rebuilt from tasks/ + git.
   config.yml
+  CONTRACT.md      <- optional: your override of the packaged session contract
   sessions/<id>/   <- one dir per agent run: plan.md, progress.log, result.json
   worktrees/<id>/  <- the isolated checkout that session worked in
   backlog.lock     <- atomic task-claiming so parallel agents never grab the same task
 ```
+
+The session contract (plan->review->implement->`result.json`) ships inside the package
+(`autobuild/templates/CONTRACT.md`). Each session gets a staged copy in its session dir:
+`.autobuild/CONTRACT.md` if present, else a root `CLAUDE.md` that is the old contract
+(back-compat; `doctor` warns), else the packaged file. The project's own `CLAUDE.md` is
+never the contract; the session reads it from its worktree as project conventions. The
+`checks` travel in the session's prompt, because `.autobuild/` is not in the worktree.
 
 The loop, step by step:
 

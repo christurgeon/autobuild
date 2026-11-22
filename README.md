@@ -21,10 +21,14 @@ mid-flight and re-run, and it recovers from the files alone.
 
 ```
 GOAL.md       <- you write this. The north star. Rarely changes.
-CLAUDE.md     <- the contract every session obeys (plan -> review -> implement).
 tasks/        <- one .md per task, each with a unique `id`. Humans own it; agents append follow-ups.
 .autobuild/   <- machine state. Safe to delete; rebuilt from tasks/ + git.
 ```
+
+The session contract (plan -> review -> implement -> `result.json`) is packaged with
+autobuild and staged into each session's directory. To customize it, put your own copy in
+`.autobuild/CONTRACT.md`. Your project's own `CLAUDE.md` stays yours: sessions read it as
+project conventions. Your `checks` reach each session verbatim through its prompt.
 
 1. The **scheduler** atomically claims up to `max_parallel` unblocked tasks.
 2. Each gets a **fresh Claude session in its own git worktree** — it plans, self-reviews,
@@ -44,7 +48,7 @@ uv tool install .         # the `autobuild` command — or run ad hoc: uv run au
 
 # 2. Scaffold a backlog in your project:
 cd ~/my-big-project
-autobuild init            # lays down GOAL.md, CLAUDE.md, tasks/, .autobuild/config.yml
+autobuild init            # lays down GOAL.md, tasks/, .autobuild/config.yml
 
 # 3. Write GOAL.md + a few tasks/, then commit them (run refuses a dirty base tree):
 git add -A && git commit -m "autobuild backlog"
@@ -67,7 +71,7 @@ clobber a skill you've edited.
 
 | Command | What it does |
 |---|---|
-| `autobuild init` | Copy `GOAL.md`, `CLAUDE.md`, `tasks/`, and `.autobuild/config.yml` into the current project, and install the authoring skills under `.claude/skills/`. |
+| `autobuild init` | Copy `GOAL.md`, `tasks/`, and `.autobuild/config.yml` into the current project, and install the authoring skills under `.claude/skills/`. |
 | `autobuild doctor` | Preflight the environment (`claude` on PATH, git identity, base branch, disk, `gh` auth): PASS/WARN/FAIL report, exits non-zero on any FAIL. `run` enforces the critical checks itself. |
 | `autobuild run` | Run the outer loop: schedule → spawn sessions in worktrees → reap. Repeats until done. |
 | `autobuild status` | Print every task's status and any in-flight sessions. |

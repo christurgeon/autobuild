@@ -52,6 +52,10 @@ class Paths:
         return self.ab_dir / "config.yml"
 
     @property
+    def contract_override(self) -> Path:
+        return self.ab_dir / "CONTRACT.md"
+
+    @property
     def goal_file(self) -> Path:
         return self.root / "GOAL.md"
 

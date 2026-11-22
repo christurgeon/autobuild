@@ -218,3 +218,21 @@ def test_run_refuses_auto_merge_when_head_not_base(git_repo, stub_bin, monkeypat
     assert "preflight failed" in capsys.readouterr().err
     assert not any(paths.sessions_dir.iterdir())
     assert {p.name: p.read_text() for p in paths.tasks_dir.glob("*.md")} == before
+
+
+# --- contract source ---------------------------------------------------------
+
+def test_doctor_warns_on_legacy_root_contract(tmp_path):
+    paths = Paths(tmp_path)
+    paths.claude_md.write_text("# CLAUDE.md — the autobuild session contract\n")
+    level, _name, detail = preflight._check_contract(paths, Config())
+    assert level == preflight.WARN
+    assert ".autobuild/CONTRACT.md" in detail
+
+
+def test_doctor_contract_pass_when_packaged(tmp_path):
+    paths = Paths(tmp_path)
+    paths.claude_md.write_text("# my project\n")
+    level, _name, detail = preflight._check_contract(paths, Config())
+    assert level == preflight.PASS
+    assert "packaged" in detail

@@ -39,8 +39,30 @@ def test_build_prompt_anchors_only_to_worktree_and_session_dir():
     dir and is told to work only inside the worktree — it must never be handed a
     main-checkout path to resolve repo-relative work against (the original escape vector)."""
     prompt = build_prompt("/s/dir", "/s/dir/task-001.md", "/w/tree", "task-001")
-    assert "/s/dir/GOAL.md" in prompt and "/s/dir/CLAUDE.md" in prompt
+    assert "/s/dir/GOAL.md" in prompt and "/s/dir/CONTRACT.md" in prompt
     assert "outside" in prompt.lower()
+
+
+def test_build_prompt_lists_configured_checks_verbatim():
+    prompt = build_prompt("/s/dir", "/s/dir/task-001.md", "/w/tree", "task-001",
+                          checks=["uv run pytest -q", "make lint"])
+    assert "$ uv run pytest -q" in prompt
+    assert "$ make lint" in prompt
+    assert ".autobuild/config.yml" not in prompt
+
+
+def test_build_prompt_without_checks_says_none_configured():
+    prompt = build_prompt("/s/dir", "/s/dir/task-001.md", "/w/tree", "task-001")
+    assert "No checks are configured" in prompt
+
+
+def test_build_prompt_points_at_staged_contract_md():
+    import re
+    prompt = build_prompt("/s/dir", "/s/dir/task-001.md", "/w/tree", "task-001",
+                          checks=["make test"])
+    assert "/s/dir/CONTRACT.md" in prompt
+    assert re.search(r"session directory is:\s*(\S+)", prompt).group(1) == "/s/dir"
+    assert re.search(r"Work ONLY on task\s+(\S+)", prompt).group(1).rstrip(".") == "task-001"
 
 
 def test_new_session_id_unique_and_prefixed():
@@ -78,6 +100,20 @@ def test_spawn_invokes_claude_with_expected_argv(git_repo, monkeypatch, stub_pgi
     assert "--add-dir" in captured["argv"]          # posture flags follow the prefix
     assert "--strict-mcp-config" in captured["argv"]
     assert str(captured["cwd"]) == str(rs.worktree)
+
+
+def test_spawn_prompt_carries_config_checks(git_repo, monkeypatch, stub_pgid):
+    paths = make_project(git_repo)
+    task = write_task(paths)
+    captured = {}
+
+    def fake_popen(argv, **kw):
+        captured["argv"] = argv
+        return type("P", (), {"poll": lambda s: None})()
+
+    monkeypatch.setattr(session_mod, "Popen", fake_popen)
+    spawn_session(task, Config(checks=["make test"]), paths)
+    assert "$ make test" in captured["argv"][2]
 
 
 def test_spawn_writes_meta_and_sets_in_progress(git_repo, monkeypatch, stub_pgid):

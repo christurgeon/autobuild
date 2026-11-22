@@ -123,7 +123,7 @@ def main():
 
     if sdir:
         os.makedirs(sdir, exist_ok=True)
-        # Write atomically (temp + os.replace), mirroring the CLAUDE.md contract, so the
+        # Write atomically (temp + os.replace), mirroring the CONTRACT.md contract, so the
         # reaper never observes a torn result.json.
         payload = json.dumps({"task": tid, "status": status,
                               "summary": f"stub {status} for {tid}",
