@@ -22,7 +22,7 @@ mid-flight and re-run, and it recovers from the files alone.
 ```
 GOAL.md       <- you write this. The north star. Rarely changes.
 CLAUDE.md     <- the contract every session obeys (plan -> review -> implement).
-tasks/        <- one .md per task. Humans own it; agents append follow-ups.
+tasks/        <- one .md per task, each with a unique `id`. Humans own it; agents append follow-ups.
 .autobuild/   <- machine state. Safe to delete; rebuilt from tasks/ + git.
 ```
 

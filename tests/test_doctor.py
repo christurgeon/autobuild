@@ -96,6 +96,34 @@ def test_doctor_warn_dirty_base_does_not_fail(git_repo, stub_bin, capsys):
     assert "base tree clean" in capsys.readouterr().out
 
 
+def _tasks_dir(git_repo):
+    d = Paths(git_repo).tasks_dir
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def test_doctor_warns_on_malformed_task_file_but_passes(git_repo, stub_bin, capsys):
+    stub_bin()
+    d = _tasks_dir(git_repo)
+    (d / "task-002.md").write_text("---\nid: task-002\ntitle: [unclosed\nstatus: todo\n---\n")
+    (d / "README.md").write_text("# Backlog notes\n")
+    rc = preflight.doctor(Paths(git_repo), Config(integration="branch"))
+    assert rc == 0  # run tolerates the file, so doctor only WARNs
+    out = capsys.readouterr().out
+    assert "task-002.md" in out and "README.md" in out
+
+
+def test_doctor_warns_on_duplicate_task_ids(git_repo, stub_bin):
+    stub_bin()
+    d = _tasks_dir(git_repo)
+    for name in ("task-001-a.md", "task-001-b.md"):
+        (d / name).write_text("---\nid: task-001\nstatus: todo\n---\n")
+    results = {name: (level, detail) for level, name, detail in
+               preflight.run_checks(Paths(git_repo), Config(integration="branch"))}
+    level, detail = results["task files"]
+    assert level == preflight.WARN and "task-001" in detail
+
+
 def test_doctor_gh_check_only_applies_in_pr_mode(git_repo, stub_bin):
     stub_bin()
     names = {name for _l, name, _d in preflight.run_checks(Paths(git_repo),

@@ -196,3 +196,60 @@ def test_dependent_of_timeout_reported(tmp_path):
     idx = {"task-001": dep, "task-002": dependent}
     stuck = stuck_tasks([dep, dependent], idx)
     assert "timed-out-dependency: task-001" in stuck["task-002"]
+
+
+# ---- malformed + duplicate task files ---------------------------------------
+
+MALFORMED = "---\nid: task-002\ntitle: [unclosed\nstatus: todo\n---\n"
+
+
+def test_claim_skips_invalid_task_and_leaves_bytes_untouched(tmp_path):
+    paths = setup_project(tmp_path)
+    make_task(paths.tasks_dir, "task-001")
+    bad = paths.tasks_dir / "task-002.md"
+    bad.write_text(MALFORMED, encoding="utf-8")
+    before = bad.read_bytes()
+    assert [t.id for t in claim_tasks(5, paths)] == ["task-001"]
+    assert bad.read_bytes() == before
+
+
+def test_stuck_invalid_task_file_and_its_dependent(tmp_path):
+    paths = setup_project(tmp_path)
+    (paths.tasks_dir / "task-002.md").write_text(MALFORMED, encoding="utf-8")
+    make_task(paths.tasks_dir, "task-003", depends_on=["task-002"])
+    stuck = _stuck(paths)
+    assert stuck["task-002"].startswith("invalid-task-file: task-002.md (")
+    assert stuck["task-003"] == "invalid-dependency: task-002"
+
+
+def _dup(paths, name, tid, status="todo"):
+    (paths.tasks_dir / name).write_text(
+        f"---\nid: {tid}\ntitle: {name}\nstatus: {status}\npriority: 1\n"
+        f"depends_on: []\n---\n", encoding="utf-8")
+
+
+def test_duplicate_id_never_claimed(tmp_path):
+    paths = setup_project(tmp_path)
+    _dup(paths, "task-001-a.md", "task-001")
+    _dup(paths, "task-001-b.md", "task-001")
+    make_task(paths.tasks_dir, "task-002")
+    assert [t.id for t in claim_tasks(5, paths)] == ["task-002"]
+    for name in ("task-001-a.md", "task-001-b.md"):
+        assert read_task(paths.tasks_dir / name).status == "todo"
+
+
+def test_stuck_duplicate_id_names_both_files(tmp_path):
+    paths = setup_project(tmp_path)
+    _dup(paths, "task-001-a.md", "task-001")
+    _dup(paths, "task-001-b.md", "task-001")
+    assert _stuck(paths)["task-001"] == "duplicate-id: task-001 (task-001-a.md, task-001-b.md)"
+
+
+def test_dependent_of_duplicate_done_id_is_not_runnable(tmp_path):
+    paths = setup_project(tmp_path)
+    _dup(paths, "task-001-a.md", "task-001", status="done")
+    _dup(paths, "task-001-b.md", "task-001", status="done")
+    make_task(paths.tasks_dir, "task-002", depends_on=["task-001"])
+    tasks = iter_tasks(paths.tasks_dir)
+    assert runnable_tasks(tasks, task_index(paths.tasks_dir)) == []
+    assert _stuck(paths) == {"task-002": "duplicate-dependency: task-001"}

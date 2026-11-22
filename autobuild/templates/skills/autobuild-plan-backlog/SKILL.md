@@ -54,6 +54,8 @@ point the user at the **autobuild-author-goal** skill first.
      work the envelope doesn't justify, and don't omit it when the envelope demands it.
 5. **Self-lint before writing.** Verify and fix:
    - no dependency cycles; every `depends_on` id exists;
+   - every `id` is unique across `tasks/*.md` (a duplicated id is never scheduled), and every
+     file has a `status:` line (a file without one is invalid and never runs);
    - no task obviously too big for one session (split it) or untestable (vague criteria →
      make them concrete);
    - priorities are sane and the ordering matches the dependency graph;

@@ -83,13 +83,23 @@ Module responsibilities:
   problem is aggregated into one `ConfigError` so a bad config (`integration: prr`,
   `max_parallel: 0`) fails fast with exit 2 *before* any session spawns.
 - **`autobuild/tasks.py`** — the `Task` model, frontmatter I/O, `set_status`, and the follow-up
-  id allocator (`next_task_id` / `create_task_file`).
+  id allocator (`next_task_id` / `create_task_file`). `iter_tasks` reads through `load_task`,
+  which **never raises** for a bad file: a file that does not start with `---` (e.g. a
+  `tasks/README.md`) or vanished mid-scan is omitted; a file that starts with `---` but has a YAML
+  error, an unclosed block, a non-mapping block, no `status:` line, or undecodable bytes becomes
+  an in-memory `invalid` pseudo-task (`Task.error` says why; id recovered from its `id:` line,
+  else the stem). `read_task` is unchanged (raises). `index_tasks` is the single id index
+  (**first file in sorted-path order wins**); `duplicate_ids` lists every id declared by more than
+  one file.
 - **`autobuild/scheduler.py`** — `runnable_tasks` (status `todo` + every `depends_on` id is
   `done`, sorted by `(priority, id)`) and `claim_tasks(n)`, which atomically flips up to N tasks
   `todo→claimed` under an exclusive `fcntl.flock` on `.autobuild/backlog.lock` so parallel runs
   never double-claim. The same `backlog_lock` is reused when allocating follow-up ids.
   `stuck_tasks` classifies a non-terminal task that can never run (missing / blocked / cyclic
-  dependency) so the loop and `status` can name *why* instead of stalling silently.
+  dependency) so the loop and `status` can name *why* instead of stalling silently. It also names
+  `duplicate-id` / `invalid-task-file` (the task's own file) and `duplicate-dependency` /
+  `invalid-dependency` (a transitive dep). `runnable_tasks` never schedules a duplicated id, nor a
+  dependent of one (even if every copy is `done`).
 - **`autobuild/worktree.py`** — `make_worktree` / `remove_worktree` / `prune_worktrees`: one
   isolated checkout + branch (`autobuild/<task-id>`) per session, forked from `base_branch`
   (the branch is reused on a retry), then each `done` dependency's `autobuild/<dep>` branch is
@@ -156,6 +166,11 @@ Module responsibilities:
   that fails). It never uses `reset --hard`, which would revert uncommitted `tasks/` status.
 - **`autobuild/reaper.py`** — `reap_session` / `_reap_session_locked` (under a per-session
   `_session_reap_lock`), `_handle_timeout`, `file_followups`, `reap_all`, and `reap_stalled`.
+  After the base-leak check, a session whose task id is duplicated or whose file is `invalid` is
+  **deferred**: warn, return `False`, no status write, no `reaped.json` — the next pass after the
+  human fixes the file reaps it normally. (The leak branch skips its `set_status` for such a task.)
+  `_handle_timeout` re-reads under the lock with `load_task`, so a file corrupted mid-reap takes
+  the "superseded" path.
 - **`autobuild/procs.py`** — process-group control: `_signal_session`, `_kill_group`
   (`SIGTERM` → `kill_grace_seconds` → `SIGKILL` over the session's process group), and the guarded
   `_kill_orphan_group` used by reconcile.
@@ -183,7 +198,9 @@ Module responsibilities:
   checked out in the main checkout) at the start of `_run_locked`, before
   claiming or spawning, raising `PreflightError` so a misconfigured host aborts early instead
   of wasting sessions. doctor only *reports* (the base-tree-clean check is a WARN); `run` keeps
-  enforcing via `_assert_base_clean`. Imports from `common`/`guards` only (never `loop`), so
+  enforcing via `_assert_base_clean`. `_check_task_files` WARNs on `invalid` task files and
+  duplicated ids (including a duplicate whose copies are all `done`) and names ignored non-task
+  `tasks/*.md` files. Imports from `common`/`guards` only (never `loop`), so
   `supervisor` can import it without a cycle.
 - **`autobuild/progress.py`** — parse a session's stream-json `session.out` (one JSON event
   per line) into a small `SessionProgress` (`messages` = assistant-event count, a liveness
@@ -262,6 +279,9 @@ keeps the loop running. (Because a re-queue creates newly-runnable work mid-`_ha
 settle check yields back to claiming when `runnable_tasks` is non-empty rather than terminating on
 "nothing running" alone.) The template task file documents the human vocabulary
 `todo | claimed | in-progress | review | done | blocked`; the harness also applies `timeout`.
+`invalid` is read-only: `load_task` assigns it in memory to an unparseable task file and the
+harness never writes it. It is non-terminal and never runnable, so a backlog with an invalid file
+**settles** (the stuck report names it) and never reports `drained`.
 
 ## Conventions and gotchas
 
@@ -270,6 +290,9 @@ settle check yields back to claiming when `runnable_tasks` is non-empty rather t
   file anymore — running sessions live in memory, and `reconcile` recovers orphans on the next
   `run`. Re-running `autobuild run` after a kill resumes from the files; design changes to honor
   this idempotency.
+- **Task files.** A `tasks/*.md` that starts with `---` is a task and must parse (else it is
+  `invalid` and never scheduled); a file without frontmatter is ignored. Ids must be unique — a
+  duplicated id is never scheduled, never satisfies a dependency, and defers its reap.
 - **Keep the reaper idempotent.** Integration happens *before* the task is marked `done`, and
   the `reaped.json` marker guards against double-integration / double follow-up filing. Preserve
   both properties when touching `reaper.py` / `integrate.py`.
