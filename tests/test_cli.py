@@ -25,10 +25,22 @@ def test_init_lays_down_templates_byte_identical(tmp_path, monkeypatch):
     assert cli.main(["init"]) == 0
     paths = Paths(tmp_path)
     assert paths.goal_file.read_text() == template("GOAL.md")
-    assert paths.claude_md.read_text() == template("CLAUDE.md")
     assert paths.config_file.read_text() == template("config.yml")
     assert (paths.tasks_dir / "task-001-example.md").read_text() == template("tasks", "task-001-example.md")
     assert paths.sessions_dir.is_dir() and paths.worktrees_dir.is_dir()
+
+
+def test_init_does_not_write_root_claude_md(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["init"]) == 0
+    assert not Paths(tmp_path).claude_md.exists()
+
+
+def test_init_leaves_existing_root_claude_md_untouched(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    Paths(tmp_path).claude_md.write_text("# my project\n")
+    assert cli.main(["init"]) == 0
+    assert Paths(tmp_path).claude_md.read_text() == "# my project\n"
 
 
 def test_init_is_idempotent_and_preserves_edits(tmp_path, monkeypatch):

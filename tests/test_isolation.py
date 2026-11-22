@@ -185,7 +185,7 @@ def test_build_prompt_points_only_at_worktree_and_session_dir():
     assert re.search(r"session directory[^:]*is:\s*(\S+)", prompt).group(1) == "/s/dir"
     assert re.search(r"Work ONLY on task\s+(\S+)", prompt).group(1).rstrip(".") == "task-001"
     # contract is staged in the session dir, NOT referenced from the main checkout:
-    assert "/s/dir/CLAUDE.md" in prompt
+    assert "/s/dir/CONTRACT.md" in prompt
     assert "/s/dir/GOAL.md" in prompt
     # assertive confinement language is present:
     assert "/w/tree" in prompt
@@ -215,7 +215,8 @@ def test_spawn_stages_contract_and_records_base_sha(git_repo, monkeypatch):
                         lambda *a, **k: type("P", (), {"poll": lambda s: None})())
     rs = spawn_session(task, Config(), paths)
 
-    assert (rs.sdir / "CLAUDE.md").read_text() == "# contract\n"
+    # "# contract" has no legacy marker, so the packaged contract is staged instead
+    assert (rs.sdir / "CONTRACT.md").read_text() == packaged_contract()
     assert (rs.sdir / "GOAL.md").read_text() == "# goal\n"
     assert (rs.sdir / "task-001.md").exists()
     meta = json.loads((rs.sdir / "meta.json").read_text())
@@ -244,7 +245,57 @@ def test_staged_contract_cannot_be_swept_into_the_feature_commit(git_repo, monke
     git(rs.worktree, "commit", "-q", "-m", "agent work")
     committed = git(rs.worktree, "show", "--name-only", "--format=", "HEAD").stdout.split()
     assert "CLAUDE.md" not in committed and "GOAL.md" not in committed
+    assert "CONTRACT.md" not in committed
     assert not any("task-001" in f for f in committed)
+
+
+def packaged_contract():
+    import importlib.resources as ir
+    return (ir.files("autobuild") / "templates" / "CONTRACT.md").read_text(encoding="utf-8")
+
+
+LEGACY_CONTRACT = ("# CLAUDE.md \u2014 the autobuild session contract\n\n"
+                   "You are a single **autobuild** session. Write result.json.\n")
+
+
+def spawn_staged_contract(paths, monkeypatch):
+    from autobuild import session as session_mod
+    add_task(paths, "task-001", status="todo")
+    task = read_task(paths.tasks_dir / "task-001.md")
+    monkeypatch.setattr(session_mod, "_process_group_id", lambda proc: 4242)
+    monkeypatch.setattr(session_mod, "Popen",
+                        lambda *a, **k: type("P", (), {"poll": lambda s: None})())
+    rs = spawn_session(task, Config(), paths)
+    return (rs.sdir / "CONTRACT.md").read_text()
+
+
+def test_spawn_stages_packaged_contract_over_project_claude_md(git_repo, monkeypatch):
+    paths = setup(git_repo)
+    paths.claude_md.write_text("# my project rules\n", encoding="utf-8")
+    staged = spawn_staged_contract(paths, monkeypatch)
+    assert staged == packaged_contract()
+    assert "result.json" in staged
+    assert "my project rules" not in staged
+
+
+def test_spawn_stages_override_contract(git_repo, monkeypatch):
+    paths = setup(git_repo)
+    paths.contract_override.write_text("# custom\n", encoding="utf-8")
+    assert spawn_staged_contract(paths, monkeypatch) == "# custom\n"
+
+
+def test_override_beats_legacy_root_contract(git_repo, monkeypatch):
+    paths = setup(git_repo)
+    paths.claude_md.write_text(LEGACY_CONTRACT, encoding="utf-8")
+    paths.contract_override.write_text("# custom\n", encoding="utf-8")
+    assert spawn_staged_contract(paths, monkeypatch) == "# custom\n"
+
+
+def test_spawn_stages_legacy_root_contract_with_customization(git_repo, monkeypatch):
+    paths = setup(git_repo)
+    text = LEGACY_CONTRACT + "\nCUSTOM RULE\n"
+    paths.claude_md.write_text(text, encoding="utf-8")
+    assert spawn_staged_contract(paths, monkeypatch) == text
 
 
 # ---- 3. dirty-base guard + gitignore ----------------------------------------

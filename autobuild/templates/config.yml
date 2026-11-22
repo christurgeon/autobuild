@@ -48,6 +48,8 @@ integration_max_retries: 2    # integer >= 0: extra attempts for transient push/
 # Commands run after the implement phase. ALL must exit 0 to commit/finish.
 # Must be a YAML list of non-empty strings (a bare string is rejected). Tailor
 # these to your project. Empty list = no checks (not recommended).
+# Each session gets these commands verbatim in its prompt; the reaper re-runs them.
+# (To customize the session contract itself, put it in .autobuild/CONTRACT.md.)
 checks:
   - "echo 'replace me with real checks, e.g. npm test'"
 

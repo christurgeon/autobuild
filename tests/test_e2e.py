@@ -23,8 +23,8 @@ def init_project(git_repo, monkeypatch, integration="auto-merge", max_parallel=5
            .replace("integration: pr", f"integration: {integration}")
            .replace("max_parallel: 3", f"max_parallel: {max_parallel}"))
     paths.config_file.write_text(cfg)
-    # Commit the scaffolding init laid down (GOAL.md, CLAUDE.md, .gitignore): `run` now
-    # refuses a dirty base tree, and an uncommitted contract file is exactly the kind of
+    # Commit the scaffolding init laid down (GOAL.md, .gitignore): `run` now
+    # refuses a dirty base tree, and an uncommitted GOAL.md is exactly the kind of
     # stray edit a worktree-escaping session could sweep. tasks/ + .autobuild/ are exempt.
     import subprocess
     subprocess.run(["git", "-C", str(git_repo), "add", "-A"], check=True)

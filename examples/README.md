@@ -38,10 +38,10 @@ then `005` (gated behind `003`) and finally `006` (gated behind both `003` and `
 - **Every task starts `todo`.** That's the only status a human authors. The harness drives
   the rest of the lifecycle (`claimed → in-progress → done | blocked`) — you don't hand-edit
   those. See the README's task state machine.
-- **`CLAUDE.md` is omitted on purpose.** `autobuild init` also drops a `CLAUDE.md` (the
-  contract every session obeys: plan → review → implement → write `result.json`). It's
-  identical for every project, so it's not duplicated here — see
-  [`autobuild/templates/CLAUDE.md`](../autobuild/templates/CLAUDE.md).
+- **There is no contract file here.** The contract every session obeys (plan → review →
+  implement → write `result.json`) is packaged with autobuild and staged into each session
+  dir, so a project does not carry it — see
+  [`autobuild/templates/CONTRACT.md`](../autobuild/templates/CONTRACT.md).
 - **`.autobuild/` holds only `config.yml` here.** At runtime the harness also creates
   `sessions/`, `worktrees/`, and `backlog.lock` under `.autobuild/` — all disposable machine
   state, rebuilt from `tasks/` + git, so none of it is checked in.

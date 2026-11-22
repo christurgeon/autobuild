@@ -20,6 +20,7 @@ from shutil import which
 
 from .common import _git, current_branch, log, ok, warn
 from .config import Config
+from .contract import resolve_contract
 from .guards import dirty_base_paths
 from .paths import Paths
 from .tasks import INVALID, duplicate_ids, iter_tasks
@@ -163,6 +164,18 @@ def _check_task_files(paths: Paths, config: Config) -> CheckResult:
             f"{' | '.join(parts)} — never scheduled until fixed{tail}")
 
 
+def _check_contract(paths: Paths, config: Config) -> CheckResult:
+    # WARN only: a legacy root contract still works, but it also loads into every
+    # interactive Claude session in the repo.
+    _text, source = resolve_contract(paths)
+    if source == "legacy":
+        return (WARN, "session contract",
+                "root CLAUDE.md is the old autobuild session contract; it is still used, but "
+                "it loads into every interactive Claude session in this repo. Move it to "
+                ".autobuild/CONTRACT.md and give the root CLAUDE.md project conventions only.")
+    return (PASS, "session contract", f"using the {source} contract")
+
+
 # The full check suite, in report order. Critical (FAIL-level) checks are also the
 # subset wired into `run()` — see CRITICAL_CHECKS.
 _CHECKS = (
@@ -175,6 +188,7 @@ _CHECKS = (
     _check_gh,
     _check_disk,
     _check_task_files,
+    _check_contract,
 )
 
 # The subset `run()` enforces early (before claiming/spawning): a session genuinely

@@ -3,7 +3,7 @@
 
 Every test under tests/ drives the loop with the STUB `claude` (tests/fixtures/claude) —
 token-free and deterministic, but hand-coded to match what the harness expects, so it can
-never catch drift between `autobuild/templates/CLAUDE.md` (the session contract) and how a
+never catch drift between `autobuild/templates/CONTRACT.md` (the session contract) and how a
 live agent actually behaves. This script closes that gap: it scaffolds a throwaway project
 with ONE trivial task, drives the real outer loop end-to-end against the real CLI, and
 asserts the whole contract held — the task reached `done`, the deliverable landed on the

@@ -8,14 +8,17 @@ This repo **is the `autobuild` tool** — a file-native **Python** harness that 
 backlog of tasks toward a `GOAL.md` by spawning fresh, isolated Claude Code sessions
 (`claude -p`) in parallel git worktrees. Read `README.md` for the full mental model.
 
-**Critical distinction:** the files under `autobuild/templates/` (`autobuild/templates/CLAUDE.md`,
+**Critical distinction:** the files under `autobuild/templates/` (`autobuild/templates/CONTRACT.md`,
 `autobuild/templates/GOAL.md`, `autobuild/templates/tasks/`, `autobuild/templates/config.yml`,
-`autobuild/templates/skills/`) are *scaffolding copied into a user's target project* by
-`autobuild init` (read out of the installed package via `importlib.resources`). They are
-**not** instructions for developing autobuild itself. In particular, `autobuild/templates/CLAUDE.md`
-is the **runtime contract a spawned session obeys** (plan → review → implement → write
-`result.json`). Editing it changes how *target-project sessions* behave, not how you work on this
-codebase. `autobuild/templates/skills/` are likewise target-project artifacts: Claude Code Skills
+`autobuild/templates/skills/`) are *target-project artifacts* read out of the installed package
+via `importlib.resources`. `autobuild init` copies `GOAL.md`, `tasks/`, `config.yml` and the
+skills into a user's project; it does **not** copy the contract. They are **not** instructions
+for developing autobuild itself. In particular, `autobuild/templates/CONTRACT.md` is the
+**runtime contract a spawned session obeys** (plan → review → implement → write `result.json`);
+the harness stages it into each session dir. Editing it changes how *target-project sessions*
+behave, not how you work on this codebase. Do not quote the contract's heading or opening line
+verbatim near the top of this file: a root `CLAUDE.md` whose first 10 lines carry them is taken
+as a legacy contract (`contract.is_legacy_contract`), and this repo dogfoods itself. `autobuild/templates/skills/` are likewise target-project artifacts: Claude Code Skills
 (`autobuild-author-goal`, `autobuild-plan-backlog`, `autobuild-configure`, `autobuild-triage`)
 installed into the user's `.claude/skills/` to help a *human* author and operate a backlog
 interactively — each carries a guard so a spawned single-task session won't invoke it. This root
@@ -35,7 +38,7 @@ uv run pytest                    # run the full suite (unit + a token-free e2e l
 # Exercise the CLI against a throwaway target project (never run init in this repo):
 uv run autobuild --help
 mkdir -p /tmp/ab-scratch && cd /tmp/ab-scratch && git init
-uv run autobuild init            # lay down GOAL.md, CLAUDE.md, tasks/, .autobuild/config.yml
+uv run autobuild init            # lay down GOAL.md, tasks/, .autobuild/config.yml
 uv run autobuild run             # outer loop: schedule -> spawn -> reap, until drained
 uv run autobuild status          # task + session state
 ```
@@ -46,7 +49,7 @@ configured. The e2e tests (`tests/test_e2e.py`) drive the whole loop against a *
 on `PATH`** (`tests/fixtures/claude`, wired up in `tests/conftest.py`), so they spend no tokens.
 
 Because the stub is hand-coded to match the harness, it can't catch drift between
-`templates/CLAUDE.md` (the session contract) and real agent behavior. `tools/live_smoke.py`
+`templates/CONTRACT.md` (the session contract) and real agent behavior. `tools/live_smoke.py`
 closes that: an **opt-in, ad-hoc** runner that drives one real `claude -p` task end-to-end and
 asserts the whole contract held. It spends real tokens + needs a `claude` login, so it lives
 **outside `tests/`** (pyproject `testpaths = ["tests"]`) and is **never collected by pytest/CI**
@@ -108,8 +111,8 @@ Module responsibilities:
   conflict) or `DependencyMergeError` (other failure, e.g. no git identity), aborting first so no
   half-merged tree is left.
 - **`autobuild/session.py`** — `spawn_session`: builds the session dir + worktree + `meta.json`,
-  **stages the contract/`GOAL.md`/task into the session dir** (`_stage_contract`) and points the
-  prompt only at those copies + the worktree — never a main-checkout path, so the agent has no
+  **stages the contract/`GOAL.md`/task into the session dir** (`contract.stage_contract`) and
+  points the prompt only at those copies + the worktree — never a main-checkout path, so the agent has no
   base-tree path to resolve work against (the original worktree-escape vector) — snapshots
   `base_branch`'s sha into `meta.json` (`base_sha`, for the leak check), sets the task
   `in-progress`, and launches a **fresh `claude -p`** in its **own process group**
@@ -191,13 +194,21 @@ Module responsibilities:
   outcome/attempts/wall-time + cost + stuck list — prints a short digest, and fires `done`;
   best-effort, so a summary-write failure never masks the real outcome or a re-raised halt), and
   `clean`.
+- **`autobuild/contract.py`** — the session contract. `resolve_contract(paths)` returns
+  `(text, source)`: the `.autobuild/CONTRACT.md` override, else a root `CLAUDE.md` that
+  `is_legacy_contract` (marker phrases in its first 10 lines; back-compat), else the packaged
+  `templates/CONTRACT.md`. `stage_contract` writes the result to `<sdir>/CONTRACT.md` and copies
+  `GOAL.md` + the task. `checks_block(checks)` renders the **Checks** block `build_prompt`
+  puts in the prompt: `.autobuild/config.yml` is gitignored, so the prompt is the only place a
+  session learns the commands the reaper re-runs. Leaf module (no loop imports).
 - **`autobuild/preflight.py`** — `autobuild doctor`: cheap, side-effect-free environment
   checks each returning `(level, name, detail)` (PASS/WARN/FAIL). `doctor` prints a report
   and exits non-zero if any check FAILs (WARN never fails); `assert_run_preflight` runs the
   **critical** subset (`claude` on PATH, git identity, and — auto-merge only — `base_branch`
   checked out in the main checkout) at the start of `_run_locked`, before
   claiming or spawning, raising `PreflightError` so a misconfigured host aborts early instead
-  of wasting sessions. doctor only *reports* (the base-tree-clean check is a WARN); `run` keeps
+  of wasting sessions. `_check_contract` reports the contract source and WARNs on a legacy
+  root contract. doctor only *reports* (the base-tree-clean check is a WARN); `run` keeps
   enforcing via `_assert_base_clean`. `_check_task_files` WARNs on `invalid` task files and
   duplicated ids (including a duplicate whose copies are all `done`) and names ignored non-task
   `tasks/*.md` files. Imports from `common`/`guards` only (never `loop`), so
@@ -218,11 +229,13 @@ This is the part that requires reading multiple files to understand:
 
 1. `claim_tasks` flips a runnable `todo` task → `claimed` under the backlog lock.
 2. `spawn_session` creates `.autobuild/sessions/<sid>/` + a worktree, stages the
-   contract/`GOAL.md`/task into the session dir and snapshots `base_sha` into `meta.json`, sets
+   contract (`resolve_contract`: override → legacy root → packaged) as `CONTRACT.md`, plus
+   `GOAL.md` and the task, into the session dir, puts `config.checks` in the prompt's Checks
+   block, and snapshots `base_sha` into `meta.json`, sets
    the task `in-progress`, and launches a **fresh `claude -p` process** (the Ralph property: no
    context carries between sessions — all state is files + git). It returns a `RunningSession`
    the loop tracks in memory.
-3. The session follows `autobuild/templates/CLAUDE.md`'s contract and ends by writing
+3. The session follows its staged `CONTRACT.md` and ends by writing
    `.autobuild/sessions/<sid>/result.json` with `status: COMPLETE | BLOCKED | NEEDS_HUMAN`.
 4. `reap_session` reads that sentinel and acts. **Before anything else** it runs the
    worktree-escape check (`base_leak_commits`): if the session left a non-merge commit on

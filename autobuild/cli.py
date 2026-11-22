@@ -23,8 +23,6 @@ def ab_init(paths: Paths) -> int:
 
     if not paths.goal_file.exists():
         paths.goal_file.write_text((tpl / "GOAL.md").read_text(encoding="utf-8"), encoding="utf-8")
-    if not paths.claude_md.exists():
-        paths.claude_md.write_text((tpl / "CLAUDE.md").read_text(encoding="utf-8"), encoding="utf-8")
 
     paths.tasks_dir.mkdir(parents=True, exist_ok=True)
     if not any(paths.tasks_dir.glob("*.md")):
@@ -74,7 +72,7 @@ def _install_skills(src, skills_dir) -> None:
 
     Each skill dir is copied only if it does not already exist, so re-running init is a
     no-op and a user's edited/installed skill is never clobbered (mirrors how GOAL.md and
-    CLAUDE.md are guarded)."""
+    config.yml are guarded)."""
     if not src.is_dir():
         return
     for skill in src.iterdir():
@@ -113,7 +111,8 @@ def build_parser() -> argparse.ArgumentParser:
                     "State lives under .autobuild/ and is rebuilt from tasks/ + git.",
     )
     sub = parser.add_subparsers(dest="command")
-    sub.add_parser("init", help="copy GOAL.md, CLAUDE.md, tasks/, .autobuild/config.yml into this project")
+    sub.add_parser("init", help="copy GOAL.md, tasks/, .autobuild/config.yml into this project "
+                                         "(the session contract is packaged, not copied)")
     sub.add_parser("doctor", help="preflight: check the environment before a run spends tokens")
     sub.add_parser("run", help="schedule -> spawn sessions in worktrees -> reap, until drained")
     sub.add_parser("status", help="print every task's status and any in-flight sessions")

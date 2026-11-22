@@ -39,9 +39,10 @@ in files and git — read it before proposing anything.
      blocked by several (e.g. one `blocked` + one `timeout`) while STUCK surfaces just one.
    - **checks failed** (COMPLETE but the reaper's verify re-run blocked it — see
      `<session>/checks.log` if present),
-   - **ran out of time** (`timeout`: deadline hit. The partial `autobuild/<id>` branch is
-     preserved until a retry re-forks from base — on a settled-without-retry run it's still
-     there to inspect; `progress.log` usually shows what ate the budget).
+   - **ran out of time** (`timeout`: deadline hit. Within `timeout_max_retries` the
+     harness deletes the partial branch itself and the automatic retry forks again from
+     base. A terminal `timeout` keeps its `autobuild/<id>` branch for you to inspect;
+     `progress.log` usually shows what ate the budget).
    - **needs a human decision** (NEEDS_HUMAN).
    - **broken task file** — STUCK says `invalid-task-file: <file> (<error>)` (the file starts
      with `---` but its frontmatter does not parse, does not close, is not a mapping, or has
@@ -60,13 +61,20 @@ in files and git — read it before proposing anything.
      <sha-before-leak>`), then re-queue the task (`status: todo`). If it was a *concurrent*
      human/CI commit (not a real escape), just keep it and re-queue the task.
 4. **Propose a concrete next action per task** — tie it to the cause: edit the task to
-   clarify/scope it down and re-queue (set `status: todo`; the next `run` re-forks from
-   base), split it into follow-ups, fix the config (raise `task_timeout_seconds`, correct a
+   clarify/scope it down and re-queue (set `status: todo`), split it into follow-ups, fix the config (raise `task_timeout_seconds`, correct a
    check command), or escalate to the human. **When a dependent is blocked by multiple
    upstream tasks, every one must reach `done` before it can run** — propose fixes for all
    of them, not just the one STUCK named. Note: a task left terminal `timeout` has already
    spent its `timeout_max_retries` budget, so it won't auto-retry — re-queueing it is a
    manual `status: todo` flip.
+
+   **A manual re-queue reuses the branch.** Setting a `blocked` or terminal `timeout` task
+   back to `status: todo` **reuses the existing `autobuild/<id>` branch** and its earlier
+   commits. The branch is not rebased onto the current base (done dependencies are still
+   merged in). That helps when the earlier work is worth keeping. For a fresh start, delete
+   the branch before the next run: `git branch -D autobuild/<id>` (run `git worktree prune`
+   first if git says the branch is checked out). The next `run` then forks again from
+   `base_branch`.
 5. **PR review for dependency chains (pr mode) — only if applicable.** *Skip this unless
    there are `done` tasks whose PRs form a dependency chain.* For a chain A → B → C,
    explain the stacked-history limitation — each PR contains its dependencies' commits —
@@ -76,4 +84,4 @@ in files and git — read it before proposing anything.
 
 **Never mutate the backlog silently.** Present the triage and the proposed changes first;
 apply task edits or status flips only after the user approves. Re-queueing is just setting
-a task's `status:` back to `todo` — the harness handles the re-fork.
+`status:` back to `todo`; decide first whether to keep or delete `autobuild/<task-id>`.

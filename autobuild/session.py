@@ -6,17 +6,17 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import sys
 import time
 import uuid
-from contextlib import suppress
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from subprocess import DEVNULL, Popen
 
 from .config import Config
+from .contract import checks_block, stage_contract
 from .paths import Paths
 from .tasks import Task, set_status, task_index
 from .worktree import WorktreeError, branch_name, head_sha, make_worktree
@@ -49,14 +49,16 @@ def new_session_id() -> str:
     return f"sess-{stamp}-{uuid.uuid4().hex[:8]}"
 
 
-def build_prompt(sdir: str, task_file: str, wt: str, tid: str) -> str:
+def build_prompt(sdir: str, task_file: str, wt: str, tid: str,
+                 checks: Sequence[str] = ()) -> str:
     # The agent is anchored ONLY to its worktree and its session dir — never to the main
     # checkout. The contract, goal, and task are STAGED INTO the session dir (see
-    # _stage_contract) and referenced there, so the agent is never handed a main-checkout
-    # path to resolve repo-relative work against. (That anchoring was the original escape:
-    # given `/proj/src/...`, an agent would edit + commit in /proj — the live base tree —
-    # instead of its worktree.) Staging copies also means the session sees an
-    # edited-but-uncommitted GOAL/CLAUDE/task that a fresh worktree wouldn't contain.
+    # contract.stage_contract) and referenced there, so the agent is never handed a
+    # main-checkout path to resolve repo-relative work against. (That anchoring was the
+    # original escape: given `/proj/src/...`, an agent would edit + commit in /proj — the
+    # live base tree — instead of its worktree.) Staging copies also means the session sees
+    # an edited-but-uncommitted GOAL/task that a fresh worktree wouldn't contain. The checks travel in the prompt because
+    # `.autobuild/config.yml` is gitignored and absent from the worktree.
     # `task_file` is the staged copy in `sdir`. "session directory is:" and "Work ONLY on
     # task" are load-bearing markers the reaper/stub parse — keep them verbatim.
     return (
@@ -69,27 +71,16 @@ def build_prompt(sdir: str, task_file: str, wt: str, tid: str) -> str:
         f"worktree is a contract violation that the harness detects and rejects.\n\n"
         f"Your contract, the project's north star, and your task are staged in your "
         f"session directory — read them there:\n"
-        f"  - CLAUDE.md (your contract): {sdir}/CLAUDE.md\n"
-        f"  - GOAL.md (the north star):  {sdir}/GOAL.md\n"
-        f"  - your task file:            {task_file}\n"
+        f"  - CONTRACT.md (your contract): {sdir}/CONTRACT.md\n"
+        f"  - GOAL.md (the north star):    {sdir}/GOAL.md\n"
+        f"  - your task file:              {task_file}\n"
         f"then follow plan -> review -> implement and finish by writing {sdir}/result.json.\n"
+        f"If the repository has its own CLAUDE.md, it gives project conventions; where it "
+        f"conflicts with your contract's workflow or result.json protocol, the contract "
+        f"wins.\n\n"
+        f"{checks_block(checks)}\n"
         f"Work ONLY on task {tid}. Make all code changes from within {wt}.\n"
     )
-
-
-def _stage_contract(sdir: Path, paths: Paths, task: Task) -> Path:
-    """Copy the contract (CLAUDE.md), the north star (GOAL.md), and the task file into the
-    session dir so the prompt can point the agent there instead of at the main checkout.
-    Returns the staged task-file path. GOAL/CLAUDE copies are best-effort: a missing one
-    just isn't staged. They land in `sdir` — already `--add-dir`'d and OUTSIDE the worktree
-    tree — so they are never swept into the agent's feature commit."""
-    for src, name in ((paths.claude_md, "CLAUDE.md"), (paths.goal_file, "GOAL.md")):
-        with suppress(OSError):
-            if src.is_file():
-                shutil.copyfile(src, sdir / name)
-    staged_task = sdir / task.path.name
-    shutil.copyfile(task.path, staged_task)
-    return staged_task
 
 
 def _atomic_write_json(path: Path, payload: dict) -> None:
@@ -344,8 +335,8 @@ def spawn_session(task: Task, config: Config, paths: Paths) -> RunningSession:
     _atomic_write_json(sdir / "meta.json", meta)
     set_status(task.path, "in-progress")
 
-    staged_task = _stage_contract(sdir, paths, task)
-    prompt = build_prompt(str(sdir), str(staged_task), str(wt), tid)
+    staged_task = stage_contract(sdir, paths, task)
+    prompt = build_prompt(str(sdir), str(staged_task), str(wt), tid, config.checks)
     out = open(sdir / "session.out", "w")
     err = open(sdir / "session.err", "w")
     try:
