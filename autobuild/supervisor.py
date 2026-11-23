@@ -6,22 +6,24 @@ to max_iterations on tasks stuck behind unsatisfiable deps."""
 from __future__ import annotations
 
 import contextlib
+import signal
 import subprocess
 import time
 
+from . import interrupt
 from .common import _classify_sentinel, _notify, log, ok, warn
 from .config import Config
 from .costs import _run_spend
 from .guards import RunHalted, _assert_base_clean, _assert_not_nested, run_lock
 from .paths import Paths
 from .preflight import assert_run_preflight
-from .procs import _kill_group
-from .reaper import reap_all
+from .procs import _kill_group, _kill_groups
+from .reaper import reap_all, reap_session
 from .reconcile import reconcile
 from .report import _finish_run, status
 from .scheduler import claim_tasks, runnable_tasks, stuck_tasks
 from .session import RunningSession, spawn_session, write_sentinel_if_absent
-from .tasks import index_tasks, is_terminal, iter_tasks
+from .tasks import index_tasks, is_terminal, iter_tasks, set_status
 
 # --- outer loop --------------------------------------------------------------
 
@@ -79,7 +81,7 @@ def _harvest(running: list[RunningSession], config: Config, paths: Paths) -> lis
             warn(f"{rs.sid} exited without a result; marking {rs.tid} BLOCKED")
             write_sentinel_if_absent(rs.sdir, rs.tid, "BLOCKED",
                                      "session process exited without writing result.json")
-    reap_all(config, paths)
+    reap_all(config, paths, should_stop=interrupt.requested)
     return survivors
 
 
@@ -117,7 +119,7 @@ def run(paths: Paths, config: Config, *, sleep_seconds: float = 2.0,
     `monotonic` is the wall-clock source for the optional run budget; injectable so
     tests can jump past the deadline without sleeping (mirrors `sleep_seconds`)."""
     _assert_not_nested()  # refuse a run nested inside a spawned session, before any lock
-    with run_lock(paths.run_lock):
+    with run_lock(paths.run_lock), interrupt.install():
         _run_locked(paths, config, sleep_seconds=sleep_seconds, monotonic=monotonic)
 
 def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float,
@@ -141,20 +143,50 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float,
     try:
         reason = _supervise(paths, config, running, run_sids,
                             sleep_seconds=sleep_seconds, monotonic=monotonic)
+        if reason == "interrupted":
+            # Inside the try: reaping an INTERRUPTED session runs the leak check first,
+            # and a BaseBranchLeak raised there must reach the halt handler below.
+            _shutdown(paths, config, running, run_sids)
     except RunHalted as exc:
         # base can't be integrated onto (a session escaped onto it, it isn't checked out,
         # or a failed merge couldn't be undone): stop now and KILL any sessions still
-        # running — they'd only burn tokens on a run that can't integrate them. Leave a summary (reason `halted`)
+        # running — they'd only burn tokens on a run that can't integrate them. Mark each
+        # killed session INTERRUPTED (not reaped) so the next run re-queues it without
+        # spending timeout budget. Leave a summary (reason `halted`)
         # so even an aborted run is legible, notify the operator of the halt, then
         # re-raise for the CLI to report. `running` is mutated in place by _supervise,
         # so it holds the live set.
-        for rs in running:
-            _kill_group(rs, config.kill_grace_seconds)
+        _kill_groups(running, config.kill_grace_seconds, should_stop=interrupt.forced)
+        _mark_interrupted(running, f"run halted; session killed: {exc}")
         _finish_run(paths, config, "halted", run_sids)
         _notify(config, "halt", str(exc))
         raise
     _finish_run(paths, config, reason, run_sids)
     status(paths, config)
+
+
+def _mark_interrupted(running: list[RunningSession], summary: str) -> list[RunningSession]:
+    """Write an INTERRUPTED sentinel for each killed session; return those written. A
+    session that wrote a real result.json (e.g. during the kill grace) keeps it."""
+    return [rs for rs in running
+            if write_sentinel_if_absent(rs.sdir, rs.tid, "INTERRUPTED", summary)]
+
+
+def _shutdown(paths: Paths, config: Config, running: list[RunningSession],
+              run_sids: set[str]) -> None:
+    """Graceful stop after an operator signal: kill every live session (one shared grace,
+    cut short by a second signal), mark each INTERRUPTED and reap only those (fast: no
+    verify, no integrate — they re-queue without spending timeout budget), write the run
+    summary, then raise RunInterrupted. A real COMPLETE result stays reapable for the next
+    run: the operator asked to stop, so no checks or merges start now."""
+    sig = interrupt.signum() or signal.SIGINT
+    name = signal.Signals(sig).name
+    warn(f"{name} received: stopping {len(running)} session(s)")
+    _kill_groups(running, config.kill_grace_seconds, should_stop=interrupt.forced)
+    for rs in _mark_interrupted(running, f"run interrupted by {name}; session killed"):
+        reap_session(rs.sdir, config, paths)
+    _finish_run(paths, config, "interrupted", run_sids)
+    raise interrupt.RunInterrupted(sig)
 
 def _supervise(paths: Paths, config: Config, running: list[RunningSession],
                run_sids: set[str], *, sleep_seconds: float, monotonic=time.monotonic) -> str:
@@ -165,8 +197,9 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession],
     Returns the terminal reason the run ended for — `drained` (backlog empty),
     `settled` (only blocked/unsatisfiable work left), or one of the budget caps with work
     left unstarted: `max_iterations`, `run_budget_seconds`, `run_budget_usd` — so the caller
-    records it in the run summary instead of re-deriving it. (The `halted` reason is supplied
-    by the RunHalted handler.)"""
+    records it in the run summary instead of re-deriving it — or `interrupted` after an
+    operator signal (the caller runs `_shutdown`). (The `halted` reason is supplied by the
+    RunHalted handler.)"""
     iteration = 0
     # Optional whole-run WALL-CLOCK budget: a monotonic deadline computed ONCE here (not per
     # poll tick — same reasoning as max_iterations below: a long fleet of poll ticks must not
@@ -188,6 +221,10 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession],
     budget_usd = config.run_budget_usd if config.run_budget_usd > 0 else None
     cost_cache: dict[str, float] = {}
     while True:
+        # Interrupt check points sit where the in-memory state is consistent: here, after
+        # each spawn+append, and after the post-claim harvest (see interrupt.py).
+        if interrupt.requested():
+            return "interrupted"
         running[:] = _harvest(running, config, paths)
 
         free = config.max_parallel - len(running)
@@ -212,15 +249,21 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession],
         claimed = claim_tasks(free, paths) if (free > 0 and not over_budget) else []
         if claimed:
             iteration += 1
-        for t in claimed:
+        for i, t in enumerate(claimed):
             rs = spawn_session(t, config, paths)
             run_sids.add(rs.sid)  # count this session against the run's cost budget
             log(f"spawn {rs.sid} -> {rs.tid}")
             running.append(rs)
+            if interrupt.requested():
+                for unspawned in claimed[i + 1:]:  # reconcile would do it; keep status honest
+                    set_status(unspawned.path, "todo")
+                return "interrupted"
 
         # Final harvest before deciding the backlog is settled: a session that
         # finishes in this window must be reaped here, not silently stranded.
         running[:] = _harvest(running, config, paths)
+        if interrupt.requested():
+            return "interrupted"
 
         if not running:
             tasks = iter_tasks(paths.tasks_dir)

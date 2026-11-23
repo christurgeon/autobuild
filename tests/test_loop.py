@@ -2047,3 +2047,139 @@ def test_reconcile_without_sweep_never_kills(git_repo, monkeypatch):
     reconcile(paths)                                      # sweep gated off (default)
     assert called == []
     assert not (sdir / "result.json").exists()           # no BLOCK either
+
+
+# ---- graceful interrupt (plan D1): INTERRUPTED re-queue, parallel kill, halt, abandon ----
+
+from autobuild import interrupt as interrupt_mod  # noqa: E402
+from autobuild import supervisor as supervisor_mod  # noqa: E402
+
+
+def test_reap_interrupted_requeues_without_consuming_timeout_budget(git_repo, git):
+    """An INTERRUPTED session (operator Ctrl-C) re-queues its task to `todo` and discards
+    the partial branch, but records NOTHING in the timeout-retry ledger."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    wt = make_worktree(paths, "sess-task-001", "task-001", "main")
+    (wt / "partial.txt").write_text("half-done")
+    git(wt, "add", "-A")
+    git(wt, "commit", "-q", "-m", "partial work")
+    sdir = make_session(paths, "task-001", "INTERRUPTED")
+    assert reap_session(sdir, Config(integration="branch"), paths) is True
+    assert read_task(paths.tasks_dir / "task-001.md").status == "todo"
+    assert not _branch_exists(git, git_repo, "task-001")
+    assert retry_count(paths.retries_ledger, "task-001") == 0
+    reaped = json.loads((sdir / "reaped.json").read_text())
+    assert reaped["status"] == "INTERRUPTED" and reaped["requeued"] is True
+    assert reap_session(sdir, Config(integration="branch"), paths) is False  # idempotent
+
+
+def test_reap_interrupted_still_runs_leak_check_first(git_repo, git):
+    """The leak check runs for every status: an INTERRUPTED session that escaped onto
+    base is blocked, not re-queued."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    base0 = git(git_repo, "rev-parse", "HEAD").stdout.strip()
+    (git_repo / "escaped.txt").write_text("oops")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-q", "-m", "escaped onto base")
+    sdir = make_session(paths, "task-001", "INTERRUPTED")
+    meta = json.loads((sdir / "meta.json").read_text())
+    meta.update(base_branch="main", base_sha=base0)
+    (sdir / "meta.json").write_text(json.dumps(meta))
+    assert reap_session(sdir, Config(integration="branch"), paths) is True
+    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+    assert (sdir / "leak.json").exists()
+
+
+def test_kill_groups_signals_all_then_one_shared_grace(git_repo, stub_bin):
+    """Three SIGTERM-ignoring sessions share ONE grace (not 3 x grace), then all are
+    SIGKILLed and reaped."""
+    paths = setup(git_repo)
+    rss = [_spawn_real(paths, stub_bin, f"task-00{i}", STUB_SLEEP="30",
+                       STUB_IGNORE_SIGTERM="1") for i in (1, 2, 3)]
+    for rs in rss:
+        _await_ready(rs.sdir)
+    t0 = time.monotonic()
+    procs_mod._kill_groups(rss, 1)
+    assert time.monotonic() - t0 < 2
+    assert all(rs.proc.returncode is not None for rs in rss)
+
+
+def test_kill_groups_forced_skips_grace(git_repo, stub_bin):
+    paths = setup(git_repo)
+    rs = _spawn_real(paths, stub_bin, STUB_SLEEP="30", STUB_IGNORE_SIGTERM="1")
+    _await_ready(rs.sdir)
+    t0 = time.monotonic()
+    procs_mod._kill_groups([rs], 10, should_stop=lambda: True)
+    assert time.monotonic() - t0 < 2
+    assert rs.proc.returncode is not None
+
+
+def test_halt_writes_interrupted_sentinels_for_killed_sessions(git_repo, stub_bin, monkeypatch):
+    """A halt kills the live sessions and marks each INTERRUPTED (not reaped), so the next
+    run re-queues them without charging the timeout budget."""
+    paths = setup(git_repo)
+    live = {}
+
+    def fake_supervise(paths, config, running, run_sids, **kw):
+        rs = _spawn_real(paths, stub_bin, STUB_SLEEP="30")
+        _await_ready(rs.sdir)
+        running.append(rs)
+        run_sids.add(rs.sid)
+        live["rs"] = rs
+        raise loop_mod.BaseBranchLeak("simulated leak")
+
+    monkeypatch.setattr(supervisor_mod, "_supervise", fake_supervise)
+    cfg = Config(integration="auto-merge", claude_cmd="claude", kill_grace_seconds=1)
+    with pytest.raises(loop_mod.BaseBranchLeak):
+        loop_mod.run(paths, cfg)
+    rs = live["rs"]
+    assert rs.proc.returncode is not None
+    assert json.loads((rs.sdir / "result.json").read_text())["status"] == "INTERRUPTED"
+    assert not (rs.sdir / "reaped.json").exists()
+    assert retry_count(paths.retries_ledger, "task-001") == 0
+
+
+def test_complete_reap_abandoned_when_checks_fail_during_shutdown(git_repo, git, monkeypatch):
+    """During shutdown a failing check is likely the terminal SIGINT hitting the check
+    child: leave the session unreaped (task still in-progress) for the next run."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001")
+    wt = _worktree_with_commit(paths, git, broken=False)
+    sdir = make_session(paths, "task-001", "COMPLETE", commit="x")
+    cfg = Config(integration="branch", checks=["test ! -f BROKEN"])
+    (wt / "BROKEN").write_text("x")                  # untracked: makes the check fail
+    monkeypatch.setattr(interrupt_mod, "requested", lambda: True)
+    assert reap_session(sdir, cfg, paths) is False
+    assert not (sdir / "reaped.json").exists()
+    assert read_task(paths.tasks_dir / "task-001.md").status == "in-progress"
+    (wt / "BROKEN").unlink()
+    monkeypatch.setattr(interrupt_mod, "requested", lambda: False)
+    assert reap_session(sdir, cfg, paths) is True
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"
+
+
+def test_supervise_interrupt_stops_spawning_and_unclaims(git_repo, monkeypatch):
+    """An interrupt during the spawn loop stops spawning; claimed-but-unspawned tasks go
+    straight back to `todo` and _supervise returns `interrupted`."""
+    paths = setup(git_repo)
+    for i in (1, 2, 3):
+        add_task(paths, f"task-00{i}", status="todo")
+    flag = []
+    monkeypatch.setattr(interrupt_mod, "requested", lambda: bool(flag))
+
+    def fake_spawn(task, config, paths):
+        flag.append(1)  # the signal lands while the first session spawns
+        sid = f"sess-{task.id}"
+        return RunningSession(sid, task.id, paths.sessions_dir / sid, None, task, _Alive())
+
+    monkeypatch.setattr(supervisor_mod, "spawn_session", fake_spawn)
+    running, sids = [], set()
+    reason = loop_mod._supervise(paths, Config(max_parallel=3), running, sids,
+                                 sleep_seconds=0.01)
+    assert reason == "interrupted"
+    assert [rs.tid for rs in running] == ["task-001"]
+    st = {t: read_task(paths.tasks_dir / f"{t}.md").status
+          for t in ("task-001", "task-002", "task-003")}
+    assert st == {"task-001": "claimed", "task-002": "todo", "task-003": "todo"}

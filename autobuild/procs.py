@@ -6,7 +6,8 @@ from __future__ import annotations
 import contextlib
 import os
 import signal
-import subprocess
+import time
+from collections.abc import Callable
 
 from .common import warn
 from .session import RunningSession
@@ -23,22 +24,32 @@ def _signal_session(rs: RunningSession, sig: int) -> None:
 
 
 def _kill_group(rs: RunningSession, grace: float) -> None:
-    """Terminate a session and reap its child. If already exited, just reap. Otherwise
-    SIGTERM -> wait(grace) -> SIGKILL -> wait(), leaving no zombie."""
-    proc = rs.proc
-    if proc is None:
-        return
-    if proc.poll() is not None:
-        return  # already exited: poll() reaped it
-    _signal_session(rs, signal.SIGTERM)
-    try:
-        proc.wait(timeout=grace)
-        return  # exited within grace -> reaped
-    except subprocess.TimeoutExpired:
-        pass
-    _signal_session(rs, signal.SIGKILL)
-    proc.wait()  # SIGKILL is uncatchable; wait unbounded so the child is always reaped
-    #              (a bounded wait could time out and leak a zombie the loop won't reclaim)
+    """Terminate one session and reap its child (see `_kill_groups`)."""
+    _kill_groups([rs], grace)
+
+
+def _kill_groups(sessions: list[RunningSession], grace: float,
+                 should_stop: Callable[[], bool] = lambda: False) -> None:
+    """Terminate sessions in parallel and reap their children: SIGTERM every live group,
+    wait ONE shared grace (so N sessions cost 1 x grace, not N x grace), then SIGKILL the
+    remainder and wait() each, leaving no zombie. Already-exited sessions are just reaped.
+    `should_stop()` is polled during the grace; True skips the rest of it (a forced
+    shutdown)."""
+    live = [rs for rs in sessions if rs.proc is not None and rs.proc.poll() is None]
+    for rs in live:
+        _signal_session(rs, signal.SIGTERM)
+    deadline = time.monotonic() + grace
+    while live and not should_stop():
+        live = [rs for rs in live if rs.proc.poll() is None]  # poll() reaps the exited
+        remaining = deadline - time.monotonic()
+        if not live or remaining <= 0:
+            break
+        time.sleep(min(0.1, remaining))
+    for rs in live:
+        if rs.proc.poll() is None:
+            _signal_session(rs, signal.SIGKILL)
+            rs.proc.wait()  # SIGKILL is uncatchable; wait unbounded so the child is always
+            #                 reaped (a bounded wait could leak a zombie)
 
 def _kill_orphan_group(pgid: object) -> bool:
     """SIGKILL an orphaned session's process group — a crashed run's detached `claude`

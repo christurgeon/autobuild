@@ -103,7 +103,8 @@ timeout_max_retries: 2        # integer >= 0: auto-retries for a timed-out task 
 #   AUTOBUILD_EVENT    one of: done | halt | needs_human
 #   AUTOBUILD_MESSAGE  a short human-readable summary of the event
 # Events (low-volume by design — run-level + NEEDS_HUMAN, never per-task-success):
-#   done         the run ended (drained / settled / max_iterations); message has the counts
+#   done         the run ended (drained / settled / max_iterations / a budget cap /
+#                interrupted by Ctrl-C or SIGTERM); message has the reason + counts
 #   halt         the run HALTED (auto-merge): a session escaped onto base_branch, base_branch
 #                is not checked out, or a failed merge could not be undone
 #   needs_human  a session reported NEEDS_HUMAN (names the task)

@@ -143,7 +143,7 @@ Module responsibilities:
   **notification choke point**: when `config.notify_command` is set it runs that shell command
   with `AUTOBUILD_EVENT`/`AUTOBUILD_MESSAGE` in the env, bounded by a timeout and swallowing every
   failure (a broken notifier never breaks a run). It fires on three coarse events — `done` (run
-  end, in `_finish_run`), `halt` (the `RunHalted` path), and `needs_human`
+  end, in `_finish_run`, including reason `interrupted`), `halt` (the `RunHalted` path), and `needs_human`
   (`_reap_session_locked`) — and is operator-controlled shell, not a security boundary.
 - **`autobuild/guards.py`** — the single-supervisor `run_lock` (`fcntl.flock` on
   `.autobuild/run.lock`, `RunLockHeld`), the nested-run refusal (`_assert_not_nested`,
@@ -168,22 +168,41 @@ Module responsibilities:
   merge-footprint paths to HEAD, then `reset --merge` again; raises `MergeUndoFailed` to halt if
   that fails). It never uses `reset --hard`, which would revert uncommitted `tasks/` status.
 - **`autobuild/reaper.py`** — `reap_session` / `_reap_session_locked` (under a per-session
-  `_session_reap_lock`), `_handle_timeout`, `file_followups`, `reap_all`, and `reap_stalled`.
+  `_session_reap_lock`), `_handle_timeout`, `_requeue_fresh` (re-queue a killed session's task
+  WITHOUT a `retries.json` entry — used for `INTERRUPTED`), `file_followups`, `reap_all` (takes
+  a `should_stop` callable; the supervisor passes `interrupt.requested` so a shutdown stops
+  reaping between sessions), and `reap_stalled`. During a shutdown a COMPLETE reap whose checks
+  or integration fail is abandoned (no status change, no `reaped.json`): the failure is likely
+  the terminal SIGINT hitting the check/git child, so the next run retries it.
   After the base-leak check, a session whose task id is duplicated or whose file is `invalid` is
   **deferred**: warn, return `False`, no status write, no `reaped.json` — the next pass after the
   human fixes the file reaps it normally. (The leak branch skips its `set_status` for such a task.)
   `_handle_timeout` re-reads under the lock with `load_task`, so a file corrupted mid-reap takes
   the "superseded" path.
-- **`autobuild/procs.py`** — process-group control: `_signal_session`, `_kill_group`
-  (`SIGTERM` → `kill_grace_seconds` → `SIGKILL` over the session's process group), and the guarded
-  `_kill_orphan_group` used by reconcile.
+- **`autobuild/procs.py`** — process-group control: `_signal_session`, `_kill_groups` (parallel:
+  `SIGTERM` every live group → ONE shared `kill_grace_seconds` → `SIGKILL` the rest; a
+  `should_stop` callable cuts the grace short), `_kill_group` (the one-session form), and the
+  guarded `_kill_orphan_group` used by reconcile.
+- **`autobuild/interrupt.py`** — a leaf module (no autobuild imports) holding the cooperative
+  Ctrl-C / SIGTERM flag: `install()` (context manager `run` wraps `_run_locked` in; restores the
+  previous handlers), `requested()` / `forced()` / `signum()` / `reset()`, and `RunInterrupted`.
+  The handler only sets a flag — raising from it could drop a session between `Popen` and
+  `running.append`, or cut a reap between merge and `reaped.json`. First signal = graceful,
+  second = skip the kill grace and restore `SIG_DFL`, third = default kill.
 - **`autobuild/reconcile.py`** — `reconcile` (startup crash recovery) and `reap`, the lock-aware
   wrapper the CLI `reap` maps to (not `reap_all` directly).
 - **`autobuild/supervisor.py`** — the outer Ralph-style loop: `run` (holds the run lock),
   `_run_locked`, `_supervise`, session harvesting (`_harvest`), and the **per-session timeout**
   (deadline-bounded waits via `_next_wait` / `_wait_until_next_event`). `_supervise` returns the
-  terminal reason (`drained` / `settled` / `max_iterations` / a budget cap); `_run_locked` passes
-  it (or `halted` from the `RunHalted` handler) to `_finish_run`.
+  terminal reason (`drained` / `settled` / `max_iterations` / a budget cap / `interrupted`);
+  `_run_locked` passes it (or `halted` from the `RunHalted` handler) to `_finish_run`.
+  `_supervise` checks `interrupt.requested()` at consistent points (top of each pass, after each
+  spawn + append — un-claiming the unspawned rest — and after the post-claim harvest). On
+  `interrupted`, `_run_locked` calls `_shutdown` inside the same `try` as the halt handler:
+  `_kill_groups` → `INTERRUPTED` sentinels (`write_sentinel_if_absent`, so a real result
+  written during the grace wins) → reap only those → `_finish_run("interrupted")` → raise
+  `RunInterrupted` (CLI exit `128 + signum`). The halt handler likewise kills via `_kill_groups`
+  and writes `INTERRUPTED` sentinels (unreaped) for the sessions it kills.
 - **`autobuild/costs.py`** — `_run_spend` (the per-run cost-budget sum, scoped to this run's
   `run_sids`) and `_settle_session_costs` (bounded, best-effort): real `claude` flushes its
   cost-bearing stream-json `result` event just AFTER `result.json` (which the harness reaps on),
@@ -290,7 +309,10 @@ of time" from "agent hit a wall". A dependent of a terminal `timeout` task sees 
 states (`is_terminal` / the `TERMINAL` set); everything else counts as in-flight, which is what
 keeps the loop running. (Because a re-queue creates newly-runnable work mid-`_harvest`, the loop's
 settle check yields back to claiming when `runnable_tasks` is non-empty rather than terminating on
-"nothing running" alone.) The template task file documents the human vocabulary
+"nothing running" alone.) `INTERRUPTED` is a synthetic sentinel (operator signal, or a halt
+killing in-flight sessions): the reaper re-queues the task to `todo` like a timeout re-queue but
+**without** touching `retries.json`, so an interrupt never spends timeout budget. The leak check
+still runs first. The template task file documents the human vocabulary
 `todo | claimed | in-progress | review | done | blocked`; the harness also applies `timeout`.
 `invalid` is read-only: `load_task` assigns it in memory to an unparseable task file and the
 harness never writes it. It is non-terminal and never runnable, so a backlog with an invalid file

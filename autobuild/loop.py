@@ -7,6 +7,7 @@ The implementation lives in cohesive modules:
 - `integrate`  — pr / auto-merge / branch integration (+ push/PR retries, post-merge verify);
 - `reaper`     — `reap_session` / `reap_all`, timeout re-queue, follow-up filing;
 - `procs`      — process-group signalling and kills;
+- `interrupt`  — the cooperative Ctrl-C / SIGTERM flag (leaf module) + `RunInterrupted`;
 - `reconcile`  — startup crash recovery and the one-shot `reap` command;
 - `costs`      — per-run spend and the run-end cost-settle grace;
 - `supervisor` — `run`, the scheduling loop, harvesting, deadline-bounded waits;
@@ -67,10 +68,12 @@ from .integrate import (  # noqa: F401
     _with_retries,
     integrate,
 )
-from .procs import _kill_group, _kill_orphan_group, _signal_session  # noqa: F401
+from .interrupt import RunInterrupted  # noqa: F401
+from .procs import _kill_group, _kill_groups, _kill_orphan_group, _signal_session  # noqa: F401
 from .reaper import (  # noqa: F401
     _handle_timeout,
     _reap_session_locked,
+    _requeue_fresh,
     _session_reap_lock,
     file_followups,
     reap_all,
@@ -91,6 +94,7 @@ from .supervisor import (  # noqa: F401
     _harvest,
     _next_wait,
     _run_locked,
+    _shutdown,
     _supervise,
     _wait_until_next_event,
     run,

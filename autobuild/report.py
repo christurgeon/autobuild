@@ -6,9 +6,10 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 
+from . import interrupt
 from .common import _c, _git, _notify, _now, _read_json, log, ok, warn
 from .config import Config
-from .costs import _settle_session_costs
+from .costs import _COST_SETTLE_SECONDS, _settle_session_costs
 from .guards import RunLockHeld, run_lock
 from .paths import Paths
 from .progress import read_progress
@@ -264,12 +265,13 @@ def _finish_run(paths: Paths, config: Config, reason: str, run_sids: set[str]) -
     BaseBranchLeak halt), so any error is warned and swallowed rather than propagated.
 
     The `done` notification fires for every non-halted end (drained / settled /
-    max_iterations); the `halt` end gets its own `halt` event from the BaseBranchLeak
+    max_iterations / interrupted); the `halt` end gets its own `halt` event from the BaseBranchLeak
     handler, so we suppress the `done` event here to avoid a double notification."""
     # Give this run's just-finished sessions a brief, bounded grace to flush their cost into
     # session.out before the summary reads it (#49). On the halt path the survivors were
-    # killed (not agent-reaped) so they aren't candidates — it's a near-noop there.
-    _settle_session_costs(paths, run_sids)
+    # killed (not agent-reaped) so they aren't candidates — it's a near-noop there. A forced
+    # (second-signal) shutdown skips the grace: the operator asked to stop now.
+    _settle_session_costs(paths, run_sids, 0 if interrupt.forced() else _COST_SETTLE_SECONDS)
     summary = None
     try:
         summary = write_run_summary(paths, config, reason)
