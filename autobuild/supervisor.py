@@ -28,6 +28,11 @@ from .tasks import index_tasks, is_terminal, iter_tasks, set_status
 
 # --- outer loop --------------------------------------------------------------
 
+# How long a session may keep running after writing a valid result.json before it is
+# killed and reaped. Real `claude` exits within seconds of its last tool call.
+_RESULT_LINGER_SECONDS = 30.0
+
+
 def _active(running: list[RunningSession]) -> list[RunningSession]:
     return [rs for rs in running if not rs.has_result() and rs.alive()]
 
@@ -49,9 +54,20 @@ def _harvest(running: list[RunningSession], config: Config, paths: Paths) -> lis
     for rs in running:
         kind = _classify_sentinel(rs.sdir)
         if kind == "reapable":
-            continue  # (1) a valid sentinel beats everything (even the deadline) — reap_all
-            #             handles it (even if still alive, so a session that writes its
-            #             result then lingers can't hang)
+            # (1) A valid sentinel beats the deadline. Reap only after the process exits:
+            # reaping a live agent removes the worktree under it, lets it rewrite
+            # result.json after the reap, and misses the cost it flushes on exit. A session
+            # that lingers past _RESULT_LINGER_SECONDS is killed, so it cannot hang the loop.
+            if rs.alive():
+                if rs.result_seen is None:
+                    rs.result_seen = now
+                past_deadline = rs.deadline is not None and now >= rs.deadline
+                if now - rs.result_seen < _RESULT_LINGER_SECONDS and not past_deadline:
+                    survivors.append(rs)
+                    continue
+                warn(f"{rs.sid} wrote result.json but is still running; stopping it")
+                _kill_group(rs, config.kill_grace_seconds)
+            continue
         if rs.alive():
             if rs.deadline is not None and now >= rs.deadline:
                 # (3) past deadline, still running, no usable result — kill, then
@@ -78,7 +94,8 @@ def _harvest(running: list[RunningSession], config: Config, paths: Paths) -> lis
                              "result.json present but could not be parsed as a JSON object")
         else:  # absent
             _write_synthetic(rs, "BLOCKED", "session process exited without writing result.json")
-    reap_all(config, paths, should_stop=interrupt.requested)
+    reap_all(config, paths, should_stop=interrupt.requested,
+             skip=frozenset(rs.sid for rs in survivors))
     return survivors
 
 

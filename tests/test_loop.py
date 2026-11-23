@@ -1301,16 +1301,70 @@ def test_harvest_spares_live_session_with_torn_sentinel(git_repo):
     assert read_task(paths.tasks_dir / "task-001.md").status == "in-progress"
 
 
-def test_harvest_reaps_valid_result_even_while_process_alive(git_repo):
-    """A valid sentinel is reaped even if the process hasn't exited yet, so a session
-    that writes its result then lingers cannot hang the loop (no regression)."""
+class _Switch:
+    """A fake proc that is alive until `exit()` is called."""
+    def __init__(self):
+        self.code = None
+
+    def poll(self):
+        return self.code
+
+    def exit(self, code=0):
+        self.code = code
+
+
+def test_harvest_waits_for_live_session_after_valid_result(git_repo):
+    """Live run 2026-11-22: a session wrote result.json, was reaped while still running,
+    then kept working (rewrote result.json after its worktree was removed) and its cost
+    was missed by the run summary. A live session with a valid result is not reaped yet."""
     paths = setup(git_repo)
-    add_task(paths, "task-001")
+    add_task(paths, "task-001", status="in-progress")
     sdir = make_session(paths, "task-001", "COMPLETE")
     rs = RunningSession("sess-task-001", "task-001", sdir,
-                        paths.worktrees_dir / "sess-task-001", None, _Alive())
+                        paths.worktrees_dir / "sess-task-001", None, _Switch())
+    survivors = loop_mod._harvest([rs], Config(integration="branch"), paths)
+    assert survivors == [rs]
+    assert rs.result_seen is not None
+    assert not (sdir / "reaped.json").exists()
+    assert read_task(paths.tasks_dir / "task-001.md").status == "in-progress"
+
+
+def test_harvest_reaps_final_result_once_lingering_session_exits(git_repo):
+    """The reaper sees the result the agent left when it exited, not an early draft."""
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    sdir = make_session(paths, "task-001", "COMPLETE")
+    proc = _Switch()
+    rs = RunningSession("sess-task-001", "task-001", sdir,
+                        paths.worktrees_dir / "sess-task-001", None, proc)
+    cfg = Config(integration="branch")
+    assert loop_mod._harvest([rs], cfg, paths) == [rs]
+    (sdir / "result.json").write_text(json.dumps({
+        "task": "task-001", "status": "BLOCKED", "summary": "tests fail",
+        "commit": "", "followups": []}))
+    proc.exit()
+    assert loop_mod._harvest([rs], cfg, paths) == []
+    assert json.loads((sdir / "reaped.json").read_text())["status"] == "BLOCKED"
+    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+
+
+def test_harvest_kills_session_lingering_past_grace_then_reaps(git_repo, monkeypatch):
+    """A session that writes its result then lingers cannot hang the loop: past the
+    linger grace it is killed and reaped."""
+    from autobuild import supervisor as sup_mod
+    paths = setup(git_repo)
+    add_task(paths, "task-001", status="in-progress")
+    sdir = make_session(paths, "task-001", "COMPLETE")
+    proc = _Switch()
+    rs = RunningSession("sess-task-001", "task-001", sdir,
+                        paths.worktrees_dir / "sess-task-001", None, proc)
+    rs.result_seen = time.monotonic() - sup_mod._RESULT_LINGER_SECONDS - 1
+    killed = []
+    monkeypatch.setattr(sup_mod, "_kill_group",
+                        lambda r, grace: (killed.append(r.sid), r.proc.exit(-15)))
     survivors = loop_mod._harvest([rs], Config(integration="branch"), paths)
     assert survivors == []
+    assert killed == ["sess-task-001"]
     assert read_task(paths.tasks_dir / "task-001.md").status == "done"
 
 
@@ -1465,15 +1519,19 @@ def test_signal_session_esrch_suppressed(monkeypatch):
 
 # ---- task-105: harvest deadline ordering + TIMEOUT + timeout status ---------
 
-def test_reapable_beats_deadline(git_repo):
+def test_reapable_beats_deadline(git_repo, monkeypatch):
     """A valid result present at harvest time is reaped COMPLETE even past deadline;
-    never killed/overwritten by TIMEOUT."""
+    never overwritten by TIMEOUT. The live process is stopped at once (no linger grace
+    past the deadline)."""
+    from autobuild import supervisor as sup_mod
     paths = setup(git_repo)
     add_task(paths, "task-001")
     sdir = make_session(paths, "task-001", "COMPLETE")          # result already on disk
+    proc = _Switch()
     rs = RunningSession("sess-task-001", "task-001", sdir,
-                        paths.worktrees_dir / "sess-task-001", None, _Alive(),
+                        paths.worktrees_dir / "sess-task-001", None, proc,
                         pgid=None, deadline=time.monotonic() - 5)  # past deadline
+    monkeypatch.setattr(sup_mod, "_kill_group", lambda r, grace: r.proc.exit(-15))
     survivors = loop_mod._harvest([rs], Config(integration="branch"), paths)
     assert survivors == []
     assert read_task(paths.tasks_dir / "task-001.md").status == "done"
