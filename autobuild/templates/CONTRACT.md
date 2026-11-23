@@ -42,13 +42,21 @@ Follow these phases **in order**. Do not skip straight to code.
 - Run every command in the **Checks** list in your prompt, from the worktree root.
   **All must pass.** Do not look for them in `.autobuild/config.yml`; that file is not in
   your worktree.
-- If checks pass: `git add -A && git commit` **from inside your worktree** with a clear
-  message referencing the task id (this commits onto your branch, never onto the base).
+- If checks pass, commit **from inside your worktree** with a clear message referencing
+  the task id (this commits onto your branch, never onto the base). Stage only the files
+  this task created or changed, by path: run `git status`, then `git add <path> ...`.
+  Leave build output, caches, logs and other files that running the checks produced
+  (for example `__pycache__/`, `node_modules/`, coverage reports) unstaged.
+  Do not use `git add -A` or `git add .`: parallel sessions that commit the same
+  generated file conflict at merge time.
 - Append a short narration of what you did to `<session-dir>/progress.log`.
 
 ## Finishing: write the sentinel
 
-Always end by writing `<session-dir>/result.json`:
+Always end by writing `<session-dir>/result.json`.
+Writing `result.json` is your last action: finish all work, checks and commits first.
+The harness reaps your session once the file appears and may remove your worktree, so
+do not edit files, commit, or rewrite `result.json` after you write it.
 
 ```json
 {

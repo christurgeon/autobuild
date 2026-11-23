@@ -237,7 +237,9 @@ Module responsibilities:
   root contract. doctor only *reports* (the base-tree-clean check is a WARN); `run` keeps
   enforcing via `_assert_base_clean`. `_check_task_files` WARNs on `invalid` task files and
   duplicated ids (including a duplicate whose copies are all `done`) and names ignored non-task
-  `tasks/*.md` files. Imports from `common`/`guards` only (never `loop`), so
+  `tasks/*.md` files. `_check_gitignore` WARNs when `.gitignore` has no rule besides
+  `.autobuild/` (sessions run the checks before committing, so unignored caches/build output
+  can land in task commits and conflict across parallel branches). Imports from `common`/`guards` only (never `loop`), so
   `supervisor` can import it without a cycle.
 - **`autobuild/progress.py`** — parse a session's stream-json `session.out` (one JSON event
   per line) into a small `SessionProgress` (`messages` = assistant-event count, a liveness

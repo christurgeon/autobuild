@@ -236,3 +236,25 @@ def test_doctor_contract_pass_when_packaged(tmp_path):
     level, _name, detail = preflight._check_contract(paths, Config())
     assert level == preflight.PASS
     assert "packaged" in detail
+
+
+# --- .gitignore coverage -----------------------------------------------------
+
+def test_doctor_warns_when_gitignore_absent(tmp_path):
+    level, _name, detail = preflight._check_gitignore(Paths(tmp_path), Config())
+    assert level == preflight.WARN
+    assert "build output" in detail
+
+
+def test_doctor_warns_when_gitignore_only_ignores_autobuild(tmp_path):
+    (tmp_path / ".gitignore").write_text(
+        "# autobuild: disposable harness state (rebuilt from tasks/ + git)\n.autobuild/\n")
+    level, _name, _detail = preflight._check_gitignore(Paths(tmp_path), Config())
+    assert level == preflight.WARN
+
+
+def test_doctor_gitignore_pass_with_project_rules(tmp_path):
+    (tmp_path / ".gitignore").write_text(".autobuild/\n__pycache__/\n\n# c\n")
+    level, _name, detail = preflight._check_gitignore(Paths(tmp_path), Config())
+    assert level == preflight.PASS
+    assert "1 project rule" in detail

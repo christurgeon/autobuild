@@ -72,7 +72,7 @@ clobber a skill you've edited.
 | Command | What it does |
 |---|---|
 | `autobuild init` | Copy `GOAL.md`, `tasks/`, and `.autobuild/config.yml` into the current project, and install the authoring skills under `.claude/skills/`. |
-| `autobuild doctor` | Preflight the environment (`claude` on PATH, git identity, base branch, disk, `gh` auth): PASS/WARN/FAIL report, exits non-zero on any FAIL. `run` enforces the critical checks itself. |
+| `autobuild doctor` | Preflight the environment (`claude` on PATH, git identity, base branch, disk, `gh` auth, task files, contract, `.gitignore` coverage): PASS/WARN/FAIL report, exits non-zero on any FAIL. `run` enforces the critical checks itself. |
 | `autobuild run` | Run the outer loop: schedule → spawn sessions in worktrees → reap. Repeats until done. |
 | `autobuild status` | Print every task's status and any in-flight sessions. |
 | `autobuild reap` | One-shot: collect finished sessions, update tasks, open PRs / merge per config. |
