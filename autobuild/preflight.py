@@ -176,6 +176,26 @@ def _check_contract(paths: Paths, config: Config) -> CheckResult:
     return (PASS, "session contract", f"using the {source} contract")
 
 
+def _check_gitignore(paths: Paths, config: Config) -> CheckResult:
+    # WARN only. Sessions run the checks before committing, so generated files (caches,
+    # build output) that the project does not ignore can land in task commits and make
+    # parallel branches conflict. `init` only adds `.autobuild/`, so that does not count.
+    gi = paths.root / ".gitignore"
+    try:
+        lines = gi.read_text(encoding="utf-8").splitlines() if gi.exists() else []
+    except (OSError, UnicodeDecodeError):
+        lines = []
+    rules = [s for s in (ln.strip() for ln in lines)
+             if s and not s.startswith("#")
+             and s.strip("/").removesuffix("/**") != ".autobuild"]
+    if rules:
+        return (PASS, ".gitignore", f"{len(rules)} project rule(s)")
+    return (WARN, ".gitignore",
+            "no project ignore rules; build output and caches the checks generate "
+            "(e.g. __pycache__/, node_modules/) can be committed and make parallel "
+            "tasks conflict — add them to .gitignore")
+
+
 # The full check suite, in report order. Critical (FAIL-level) checks are also the
 # subset wired into `run()` — see CRITICAL_CHECKS.
 _CHECKS = (
@@ -189,6 +209,7 @@ _CHECKS = (
     _check_disk,
     _check_task_files,
     _check_contract,
+    _check_gitignore,
 )
 
 # The subset `run()` enforces early (before claiming/spawning): a session genuinely

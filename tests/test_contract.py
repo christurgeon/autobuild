@@ -22,3 +22,24 @@ def test_checks_block_lists_each_command_stripped():
 
 def test_checks_block_empty_says_none_configured():
     assert "No checks are configured" in checks_block([])
+
+
+def _packaged_contract() -> str:
+    from importlib.resources import files
+    return files("autobuild").joinpath("templates/CONTRACT.md").read_text(encoding="utf-8")
+
+
+def test_contract_stages_by_path_not_add_all():
+    """Live run 2026-11-22: `git add -A` after the checks committed `__pycache__/*.pyc`,
+    and two parallel sessions' identical cache paths conflicted on auto-merge."""
+    text = _packaged_contract()
+    assert "git add -A &&" not in text
+    assert "git add <path>" in text
+    assert "Do not use `git add -A`" in text
+
+
+def test_contract_makes_result_json_the_last_action():
+    """Live run 2026-11-22: a session wrote COMPLETE early, was reaped, then rewrote
+    result.json after the harness had removed its worktree."""
+    text = _packaged_contract()
+    assert "Writing `result.json` is your last action" in text
