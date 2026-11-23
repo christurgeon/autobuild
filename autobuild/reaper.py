@@ -332,15 +332,19 @@ def _abandon_for_shutdown(sid: str, tid: str, why: str) -> bool:
 
 
 def reap_all(config: Config, paths: Paths,
-             should_stop: Callable[[], bool] = lambda: False) -> int:
-    """Reap every finished session. `should_stop()` is checked before each one; True
-    stops early and leaves the rest reapable (a shutdown is in progress)."""
+             should_stop: Callable[[], bool] = lambda: False,
+             skip: frozenset[str] = frozenset()) -> int:
+    """Reap every finished session except the ids in `skip` (sessions whose process is
+    still running). `should_stop()` is checked before each one; True stops early and
+    leaves the rest reapable (a shutdown is in progress)."""
     n = 0
     if not paths.sessions_dir.is_dir():
         return 0
     for sdir in sorted(paths.sessions_dir.iterdir()):
         if should_stop():
             break
+        if sdir.name in skip:
+            continue
         if sdir.is_dir() and reap_session(sdir, config, paths):
             n += 1
     return n

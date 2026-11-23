@@ -211,8 +211,8 @@ Module responsibilities:
   and writes `INTERRUPTED` sentinels (unreaped) for the sessions it kills.
 - **`autobuild/costs.py`** — `_run_spend` (the per-run cost-budget sum, scoped to this run's
   `run_sids`) and `_settle_session_costs` (bounded, best-effort): real `claude` flushes its
-  cost-bearing stream-json `result` event just AFTER `result.json` (which the harness reaps on),
-  so the final draining session(s) are given a short grace to flush before the summary reads them
+  cost-bearing stream-json `result` event just AFTER `result.json`; `_harvest` waits for the
+  process to exit (bounded) before reaping, and as a backstop the final draining session(s) are given a short grace to flush before the summary reads them
   (#49).
 - **`autobuild/report.py`** — `collect_status` / `status`, `write_run_summary`, `_finish_run`
   (settles costs, writes `.autobuild/run-summary.json` — counts + per-task integration
@@ -299,7 +299,11 @@ This is the part that requires reading multiple files to understand:
    running is killed (`_kill_group`) and given a synthetic `TIMEOUT` — unless a `result.json` was
    written during the grace window, which is re-classified and still wins; a process that exits
    with no usable sentinel — absent, or present but unparseable (`_classify_sentinel`) — is given
-   a synthetic `BLOCKED`. At startup `reconcile` (only while it holds the run lock) returns
+   a synthetic `BLOCKED`. A session that wrote a valid `result.json` but is still running is
+   **not reaped until its process exits** (it stays in `running`; `reap_all(skip=...)` passes it
+   over), so the reaper never removes a worktree under a live agent, reads the agent's final
+   `result.json`, and the exit flushes its cost. It is killed and then reaped once it lingers past
+   `_RESULT_LINGER_SECONDS` (30s) or its deadline. At startup `reconcile` (only while it holds the run lock) returns
    orphaned `claimed` tasks to `todo` and recovers orphaned `in-progress` sessions by writing a
    synthetic `TIMEOUT` (a crash leaves the same killed-before-result state a deadline does), so
    the reaper re-queues them — re-forking from base, bounded by `timeout_max_retries` — or leaves

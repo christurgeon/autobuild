@@ -32,6 +32,7 @@ class RunningSession:
     proc: Popen | None
     pgid: int | None = None
     deadline: float | None = None  # monotonic; set in spawn_session for a launched child
+    result_seen: float | None = None  # monotonic; first harvest that saw a valid result
 
     @property
     def result_file(self) -> Path:
