@@ -59,7 +59,8 @@ class Config:
                                       # re-spends task_timeout_seconds.
     # --- operator notifications ----------------------------------------------
     notify_command: str = ""  # shell command run on coarse run events (done — incl. reason
-                              # `interrupted` — / halt / needs_human); "" disables them.
+                              # `interrupted` — / halt / needs_human / rate_limited);
+                              # "" disables them.
 
 
 # Top-level keys autobuild understands. Anything else is a likely typo and warned.

@@ -97,3 +97,66 @@ def test_read_progress_reads_file(tmp_path):
     f.write_text("\n".join([INIT, _asst(0), _result(0.5)]), encoding="utf-8")
     p = read_progress(f)
     assert p.finished and abs(p.cost_usd - 0.5) < 1e-9 and p.messages == 1
+
+
+# ---- usage / rate-limit detection (plan D2) ----------------------------------
+# Shapes follow the Claude Code 2.1.330 stream-json schema (rate_limit_event with
+# rate_limit_info; assistant `error` tag). No live rate-limited transcript yet.
+
+def _rl(status, kind="five_hour", resets=1764000000):
+    return ('{"type":"rate_limit_event","rate_limit_info":{"status":"%s",'
+            '"resetsAt":%d,"rateLimitType":"%s"},"uuid":"u","session_id":"s"}'
+            % (status, resets, kind))
+
+
+def _asst_err(err):
+    return ('{"type":"assistant","message":{"content":[{"type":"text",'
+            '"text":"You\'ve hit your limit"}]},"error":"%s"}' % err)
+
+
+def _lines(*ls):
+    return "\n".join(ls) + "\n"
+
+
+def test_limit_rejected_rate_limit_event():
+    p = parse_progress(_lines(INIT, _asst(0), _rl("rejected")))
+    assert p.limit and "five_hour" in p.limit and "2025-11-24" in p.limit
+
+
+def test_limit_allowed_warning_is_not_a_limit():
+    assert parse_progress(_lines(INIT, _asst(0), _rl("allowed_warning"))).limit is None
+
+
+def test_limit_last_rate_limit_event_wins():
+    assert parse_progress(_lines(INIT, _rl("rejected"), _rl("allowed"))).limit is None
+
+
+def test_limit_assistant_error_tag():
+    for err in ("rate_limit", "billing_error"):
+        assert err in parse_progress(_lines(INIT, _asst(0), _asst_err(err))).limit
+
+
+def test_limit_cleared_by_later_successful_assistant():
+    assert parse_progress(_lines(INIT, _asst_err("rate_limit"), _asst(1))).limit is None
+
+
+def test_limit_ignores_agent_prose_about_rate_limits():
+    res = ('{"type":"result","subtype":"error_during_execution","is_error":true,'
+           '"result":"I implemented the rate limit middleware but tests fail"}')
+    assert parse_progress(_lines(INIT, _asst(0), res)).limit is None
+
+
+def test_limit_api_retry_alone_is_not_a_limit():
+    retry = ('{"type":"system","subtype":"api_retry","error_status":429,'
+             '"error":"rate_limit","attempt":1}')
+    assert parse_progress(_lines(INIT, _asst(0), retry)).limit is None
+
+
+def test_limit_parse_is_total():
+    bad = ['{"type":"rate_limit_event","rate_limit_info":"rejected"}',
+           '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected",'
+           '"resetsAt":"soon","rateLimitType":7}}',
+           '{"type":"assistant","error":["rate_limit"]}', '{"type":"rate_limit_ev']
+    p = parse_progress(_lines(INIT, bad[0], bad[2], bad[3]))
+    assert p.limit is None
+    assert parse_progress(_lines(INIT, bad[1])).limit == "usage limit"

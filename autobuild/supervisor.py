@@ -18,9 +18,10 @@ from .guards import RunHalted, _assert_base_clean, _assert_not_nested, run_lock
 from .paths import Paths
 from .preflight import assert_run_preflight
 from .procs import _kill_group, _kill_groups
+from .progress import detect_limit
 from .reaper import reap_all, reap_session
 from .reconcile import reconcile
-from .report import _finish_run, status
+from .report import _finish_run, rate_limited_sessions, status
 from .scheduler import claim_tasks, runnable_tasks, stuck_tasks
 from .session import RunningSession, spawn_session, write_sentinel_if_absent
 from .tasks import index_tasks, is_terminal, iter_tasks, set_status
@@ -63,10 +64,9 @@ def _harvest(running: list[RunningSession], config: Config, paths: Paths) -> lis
                 # session is TIMEOUT (retryable), whereas the same shape from a process
                 # that exited ON ITS OWN (the branch below) is terminal BLOCKED — a killed
                 # agent's torn/missing write shouldn't be held against it as a hard failure.
-                write_sentinel_if_absent(
-                    rs.sdir, rs.tid, "TIMEOUT",
-                    f"session exceeded task_timeout_seconds "
-                    f"({config.task_timeout_seconds}s) and was killed")
+                _write_synthetic(rs, "TIMEOUT",
+                                 f"session exceeded task_timeout_seconds "
+                                 f"({config.task_timeout_seconds}s) and was killed")
                 continue
             survivors.append(rs)  # (4) within deadline, still running — let it finish
             #                       (an absent or torn/mid-write sentinel under a live
@@ -74,15 +74,37 @@ def _harvest(running: list[RunningSession], config: Config, paths: Paths) -> lis
             continue
         # (2) Process exited without a usable result — BLOCK it (never silently drop).
         if kind == "corrupt":
-            warn(f"{rs.sid} exited with an unparseable result.json; marking {rs.tid} BLOCKED")
-            write_sentinel_if_absent(rs.sdir, rs.tid, "BLOCKED",
-                                     "result.json present but could not be parsed as a JSON object")
+            _write_synthetic(rs, "BLOCKED",
+                             "result.json present but could not be parsed as a JSON object")
         else:  # absent
-            warn(f"{rs.sid} exited without a result; marking {rs.tid} BLOCKED")
-            write_sentinel_if_absent(rs.sdir, rs.tid, "BLOCKED",
-                                     "session process exited without writing result.json")
+            _write_synthetic(rs, "BLOCKED", "session process exited without writing result.json")
     reap_all(config, paths, should_stop=interrupt.requested)
     return survivors
+
+
+def _write_synthetic(rs: RunningSession, status: str, summary: str) -> None:
+    """Write a harness sentinel for a session that left no usable result — RATE_LIMITED
+    instead of `status` when its stream-json output ends in a usage/rate limit
+    (`detect_limit`), so a quota hit re-queues instead of blocking or spending timeout
+    budget."""
+    limit = detect_limit(rs.sdir)
+    if limit:
+        status, summary = "RATE_LIMITED", limit
+    warn(f"{rs.sid}: no usable result; marking {rs.tid} {status} ({summary})")
+    write_sentinel_if_absent(rs.sdir, rs.tid, status, summary)
+
+
+def _rate_limited(paths: Paths, config: Config, run_sids: set[str],
+                  notified: list[bool]) -> bool:
+    """True once any of this run's sessions was reaped RATE_LIMITED. Warns and fires the
+    `rate_limited` notification on the first detection only (`notified` is the flag)."""
+    hits = rate_limited_sessions(paths, run_sids)
+    if hits and not notified:
+        notified.append(True)
+        msg = f"{hits[0]['task']}: {hits[0]['detail']}; stopped claiming new work"
+        warn(f"usage/rate limit hit — {msg}")
+        _notify(config, "rate_limited", msg)
+    return bool(hits)
 
 
 def _next_wait(running: list[RunningSession], sleep_seconds: float, now: float) -> float:
@@ -197,8 +219,9 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession],
     Returns the terminal reason the run ended for — `drained` (backlog empty),
     `settled` (only blocked/unsatisfiable work left), or one of the budget caps with work
     left unstarted: `max_iterations`, `run_budget_seconds`, `run_budget_usd` — so the caller
-    records it in the run summary instead of re-deriving it — or `interrupted` after an
-    operator signal (the caller runs `_shutdown`). (The `halted` reason is supplied by the
+    records it in the run summary instead of re-deriving it — `rate_limited` after a
+    usage/rate limit, or `interrupted` after an operator signal (the caller runs
+    `_shutdown`). (The `halted` reason is supplied by the
     RunHalted handler.)"""
     iteration = 0
     # Optional whole-run WALL-CLOCK budget: a monotonic deadline computed ONCE here (not per
@@ -220,6 +243,7 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession],
     # pass only re-reads the in-flight ones.
     budget_usd = config.run_budget_usd if config.run_budget_usd > 0 else None
     cost_cache: dict[str, float] = {}
+    limit_notified: list[bool] = []  # one `rate_limited` notification per run
     while True:
         # Interrupt check points sit where the in-memory state is consistent: here, after
         # each spawn+append, and after the post-claim harvest (see interrupt.py).
@@ -245,7 +269,10 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession],
         # same posture as run_budget_seconds).
         spent_usd = _run_spend(paths, run_sids, cost_cache) if budget_usd is not None else 0.0
         over_cost = budget_usd is not None and spent_usd >= budget_usd
-        over_budget = over_iterations or over_time or over_cost
+        # A usage/rate limit (a RATE_LIMITED session this run) stops claiming like a budget
+        # cap: new sessions would hit the same wall. In-flight ones drain and likely re-queue.
+        limited = _rate_limited(paths, config, run_sids, limit_notified)
+        over_budget = over_iterations or over_time or over_cost or limited
         claimed = claim_tasks(free, paths) if (free > 0 and not over_budget) else []
         if claimed:
             iteration += 1
@@ -266,6 +293,12 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession],
             return "interrupted"
 
         if not running:
+            # Checked FIRST: a rate-limited task was re-queued to `todo`, which the
+            # runnable re-claim below would otherwise pick straight back up.
+            if limited or _rate_limited(paths, config, run_sids, limit_notified):
+                warn("stopped after a usage/rate limit; re-queued task(s) are `todo` — "
+                     "re-run 'autobuild run' after the limit resets")
+                return "rate_limited"
             tasks = iter_tasks(paths.tasks_dir)
             index = index_tasks(tasks)
             # A reap in this pass can create newly-runnable work with nothing left running

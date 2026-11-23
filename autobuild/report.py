@@ -182,7 +182,23 @@ def _session_outcomes(paths: Paths) -> dict[str, dict]:
     return outcomes
 
 
-def write_run_summary(paths: Paths, config: Config, reason: str) -> dict:
+def rate_limited_sessions(paths: Paths, sids: set[str]) -> list[dict]:
+    """The sessions in `sids` reaped as RATE_LIMITED, each `{"task", "session", "detail"}`
+    (detail = the sentinel summary: the limit kind and reset time when known)."""
+    hits = []
+    for sid in sorted(sids):
+        sdir = paths.sessions_dir / sid
+        reaped = _read_json(sdir / "reaped.json")
+        if not reaped or reaped.get("status") != "RATE_LIMITED":
+            continue
+        result = _read_json(sdir / "result.json") or {}
+        hits.append({"task": str(result.get("task", "")), "session": sid,
+                     "detail": str(result.get("summary", ""))})
+    return hits
+
+
+def write_run_summary(paths: Paths, config: Config, reason: str,
+                      run_sids: set[str] | None = None) -> dict:
     """Build and atomically write `.autobuild/run-summary.json` — the end-of-run digest of
     what the run did. Reuses `collect_status` for counts/tasks/stuck and layers each task's
     per-session integration outcome (from reaped.json), follow-ups filed, timeout-retry
@@ -213,6 +229,8 @@ def write_run_summary(paths: Paths, config: Config, reason: str) -> dict:
         "total_cost_usd": total_cost,
         "tasks": rows,
         "stuck": report["stuck"],
+        # this run's usage/rate-limited sessions; their tasks were re-queued to `todo`
+        "rate_limited": rate_limited_sessions(paths, run_sids or set()),
     }
     _atomic_write_json(paths.run_summary, summary)
     return summary
@@ -230,6 +248,9 @@ def _print_run_digest(summary: dict) -> None:
         if row["status"] not in ("blocked", "timeout"):
             continue
         warn(f"  {row['id']} {row['status']}: {_task_digest_reason(row, stuck)}")
+    for hit in summary.get("rate_limited", []):
+        warn(f"  {hit['task']} re-queued after a usage/rate limit ({hit['detail']}); "
+             f"resume after the limit resets")
 
 
 def _task_digest_reason(row: dict, stuck: dict[str, str]) -> str:
@@ -274,7 +295,7 @@ def _finish_run(paths: Paths, config: Config, reason: str, run_sids: set[str]) -
     _settle_session_costs(paths, run_sids, 0 if interrupt.forced() else _COST_SETTLE_SECONDS)
     summary = None
     try:
-        summary = write_run_summary(paths, config, reason)
+        summary = write_run_summary(paths, config, reason, run_sids)
         _print_run_digest(summary)
     except Exception as exc:  # noqa: BLE001 — summary is advisory; never let it break a run
         warn(f"could not write run summary: {exc}")

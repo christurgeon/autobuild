@@ -472,3 +472,52 @@ def test_e2e_interrupt_keeps_result_written_during_grace(git_repo, stub_bin, mon
     stub_bin(STUB_SLEEP="0", STUB_COMPLETE_ON_SIGTERM="0")
     loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=0.05)
     assert statuses(paths) == {"task-001": "done"}
+
+
+# ---- usage / rate limits (plan D2) ------------------------------------------
+
+def _rate_limited_run(git_repo, stub_bin, monkeypatch, max_parallel=1, **stub_env):
+    stub_bin(**stub_env)
+    paths = init_project(git_repo, monkeypatch, integration="auto-merge",
+                         max_parallel=max_parallel)
+    for i in (1, 2, 3):
+        write_task(paths, f"task-00{i}")
+    loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=0.05)
+    return paths
+
+
+def test_e2e_rate_limit_requeues_and_stops_claiming(git_repo, stub_bin, monkeypatch):
+    paths = _rate_limited_run(git_repo, stub_bin, monkeypatch, STUB_RATE_LIMIT_task_001="event")
+    assert statuses(paths) == {"task-001": "todo", "task-002": "todo", "task-003": "todo"}
+    assert len(list(paths.sessions_dir.iterdir())) == 1       # 002/003 never claimed
+    summary = json.loads(paths.run_summary.read_text())
+    assert summary["reason"] == "rate_limited"
+    assert summary["rate_limited"][0]["task"] == "task-001"
+    assert "five_hour" in summary["rate_limited"][0]["detail"]
+
+
+def test_e2e_rate_limit_resume_next_run_completes(git_repo, stub_bin, monkeypatch):
+    from autobuild.retries import retry_count
+
+    paths = _rate_limited_run(git_repo, stub_bin, monkeypatch,
+                              STUB_RATE_LIMIT_task_001="assistant")
+    stub_bin(STUB_RATE_LIMIT_task_001="")
+    loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=0.05)
+    assert set(statuses(paths).values()) == {"done"}
+    assert retry_count(paths.retries_ledger, "task-001") == 0
+    assert json.loads(paths.run_summary.read_text())["reason"] == "drained"
+
+
+def test_e2e_rate_limit_notifies_once(git_repo, stub_bin, monkeypatch, tmp_path):
+    log = tmp_path / "events.log"
+    stub_bin(STUB_RATE_LIMIT="event")
+    paths = init_project(git_repo, monkeypatch, integration="auto-merge", max_parallel=2)
+    cfg = paths.config_file.read_text().replace(
+        'notify_command: ""', f"notify_command: 'echo $AUTOBUILD_EVENT >> {log}'")
+    paths.config_file.write_text(cfg)
+    for i in (1, 2, 3):
+        write_task(paths, f"task-00{i}")
+    loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=0.05)
+    events = log.read_text().split()
+    assert events.count("rate_limited") == 1
+    assert "blocked" not in statuses(paths).values()

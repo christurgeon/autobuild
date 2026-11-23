@@ -93,6 +93,15 @@ remain: a Ctrl-C that lands while a session's worktree is being created blocks t
 ("worktree creation failed"), and in `pr` mode a `git push` killed mid-flight marks the task
 `done` with the branch kept locally and no PR.
 
+### Rate limits
+
+If a session stops on a Claude usage or rate limit, autobuild re-queues its task to `todo`
+(no timeout-retry budget used), stops claiming new work, lets running sessions finish, and ends
+the run with reason `rate_limited`. `run-summary.json` lists the limited tasks with the limit
+type and reset time when known, and `notify_command` gets one `rate_limited` event. Run
+`autobuild run` again after the limit resets. Detection uses only the CLI's own structured
+stream-json signals; a limit it does not recognize falls back to the old behavior (`blocked`).
+
 ## Configuration
 
 Everything lives in `.autobuild/config.yml` — the `model`, `max_parallel`, the `checks` to

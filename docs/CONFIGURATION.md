@@ -80,9 +80,10 @@ notifier, whatever — nothing is hardcoded into the harness.
 
 | `AUTOBUILD_EVENT` | When it fires | `AUTOBUILD_MESSAGE` |
 |---|---|---|
-| `done` | the run ended (`drained` / `settled` / `max_iterations` / a budget cap / `interrupted` by Ctrl-C or SIGTERM) | the terminal reason + per-status task counts |
+| `done` | the run ended (`drained` / `settled` / `max_iterations` / a budget cap / `rate_limited` / `interrupted` by Ctrl-C or SIGTERM) | the terminal reason + per-status task counts |
 | `halt` | the run **halted** (auto-merge): a session escaped onto `base_branch`, `base_branch` is not checked out, or a failed merge could not be undone | the cause and the branch / session / task |
 | `needs_human` | a session reported `NEEDS_HUMAN` | the task id + its summary |
+| `rate_limited` | a session first hit a usage/rate limit (once per run); the run stops claiming new work and ends with reason `rate_limited` | the task id + the limit type and reset time when known |
 
 Events are **low-volume by design** — run-level plus `NEEDS_HUMAN`, never one-per-task —
 so a notifier won't spam you. The hook is **best-effort**: it's bounded by a timeout and

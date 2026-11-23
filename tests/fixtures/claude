@@ -17,6 +17,12 @@ Env knobs a test sets before driving the loop:
   STUB_COST              total_cost_usd in the terminal result event    (default 0.01)
   STUB_RESULT_DELAY      secs to delay the result event until AFTER result.json (default 0;
                          models real claude flushing cost after the sentinel — see #49)
+  STUB_RATE_LIMIT        event|assistant -> emit init + one assistant event, then a usage-limit
+                         signal (`event`: rate_limit_event status "rejected", five_hour;
+                         `assistant`: an assistant event with "error":"rate_limit"), then
+                         exit 1 with NO result.json. Shapes follow the Claude Code 2.1.330
+                         stream-json schema.
+  STUB_RATE_LIMIT_<TID>  per-task override; '-' -> '_'  (STUB_RATE_LIMIT_task_001)
 """
 import json
 import os
@@ -62,6 +68,24 @@ def main():
 
     if os.environ.get("STUB_STALL") == "1":
         return 0  # no result.json -> the reaper's stalled path must fire
+
+    limit = (os.environ.get("STUB_RATE_LIMIT_" + tid.replace("-", "_"))
+             or os.environ.get("STUB_RATE_LIMIT", ""))
+    if limit in ("event", "assistant"):
+        out = [{"type": "system", "subtype": "init", "model": "claude-stub"},
+               {"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}}]
+        if limit == "event":
+            out.append({"type": "rate_limit_event",
+                        "rate_limit_info": {"status": "rejected", "resetsAt": 1764000000,
+                                            "rateLimitType": "five_hour"}})
+        else:
+            out.append({"type": "assistant", "error": "rate_limit",
+                        "message": {"content": [{"type": "text",
+                                                 "text": "You've hit your limit"}]}})
+        for evt in out:
+            sys.stdout.write(json.dumps(evt) + "\n")
+        sys.stdout.flush()
+        return 1  # no result.json: the harness must detect the limit from session.out
 
     tkey = "STUB_STATUS_" + tid.replace("-", "_")
     status = os.environ.get(tkey) or os.environ.get("STUB_STATUS", "COMPLETE")

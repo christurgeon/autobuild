@@ -142,8 +142,9 @@ Module responsibilities:
   `_classify_sentinel`), and `_notify(config, event, message)`, the single, best-effort
   **notification choke point**: when `config.notify_command` is set it runs that shell command
   with `AUTOBUILD_EVENT`/`AUTOBUILD_MESSAGE` in the env, bounded by a timeout and swallowing every
-  failure (a broken notifier never breaks a run). It fires on three coarse events — `done` (run
-  end, in `_finish_run`, including reason `interrupted`), `halt` (the `RunHalted` path), and `needs_human`
+  failure (a broken notifier never breaks a run). It fires on four coarse events — `done` (run
+  end, in `_finish_run`, including reason `interrupted`), `rate_limited` (once per run, from
+  `_supervise`, when a session first hits a usage/rate limit), `halt` (the `RunHalted` path), and `needs_human`
   (`_reap_session_locked`) — and is operator-controlled shell, not a security boundary.
 - **`autobuild/guards.py`** — the single-supervisor `run_lock` (`fcntl.flock` on
   `.autobuild/run.lock`, `RunLockHeld`), the nested-run refusal (`_assert_not_nested`,
@@ -194,8 +195,13 @@ Module responsibilities:
 - **`autobuild/supervisor.py`** — the outer Ralph-style loop: `run` (holds the run lock),
   `_run_locked`, `_supervise`, session harvesting (`_harvest`), and the **per-session timeout**
   (deadline-bounded waits via `_next_wait` / `_wait_until_next_event`). `_supervise` returns the
-  terminal reason (`drained` / `settled` / `max_iterations` / a budget cap / `interrupted`);
-  `_run_locked` passes it (or `halted` from the `RunHalted` handler) to `_finish_run`.
+  terminal reason (`drained` / `settled` / `max_iterations` / a budget cap / `rate_limited` /
+  `interrupted`); `_run_locked` passes it (or `halted` from the `RunHalted` handler) to
+  `_finish_run`. A session that leaves no usable result and whose output ends in a usage/rate
+  limit (`progress.detect_limit`) gets a synthetic `RATE_LIMITED` instead of `BLOCKED`/`TIMEOUT`
+  (`_write_synthetic`; `reconcile` does the same for orphans). Once any of this run's sessions is
+  reaped `RATE_LIMITED`, `_supervise` stops claiming (folded into `over_budget`), fires one
+  `rate_limited` notification, drains in-flight work, and returns `rate_limited`.
   `_supervise` checks `interrupt.requested()` at consistent points (top of each pass, after each
   spawn + append — un-claiming the unspawned rest — and after the post-claim harvest). On
   `interrupted`, `_run_locked` calls `_shutdown` inside the same `try` as the halt handler:
@@ -210,7 +216,8 @@ Module responsibilities:
   (#49).
 - **`autobuild/report.py`** — `collect_status` / `status`, `write_run_summary`, `_finish_run`
   (settles costs, writes `.autobuild/run-summary.json` — counts + per-task integration
-  outcome/attempts/wall-time + cost + stuck list — prints a short digest, and fires `done`;
+  outcome/attempts/wall-time + cost + stuck list + this run's `rate_limited` sessions from
+  `rate_limited_sessions` — prints a short digest, and fires `done`;
   best-effort, so a summary-write failure never masks the real outcome or a re-raised halt), and
   `clean`.
 - **`autobuild/contract.py`** — the session contract. `resolve_contract(paths)` returns
@@ -239,7 +246,11 @@ Module responsibilities:
   supervisor read the file while `claude` is still writing it. Sessions are spawned with
   `--output-format stream-json --verbose` (so `session.out` streams live instead of buffering
   to 0 bytes) and `stdin=DEVNULL` (drops the CLI's ~3s no-stdin wait); `status` surfaces the
-  parsed progress, and the cost budget sums each session's `cost_usd`.
+  parsed progress, and the cost budget sums each session's `cost_usd`. `SessionProgress.limit`
+  / `detect_limit(sdir)` report a usage/rate limit iff the stream ENDS in one — a `rate_limit_event`
+  with `status: "rejected"`, or an `assistant` event with `error: "rate_limit" | "billing_error"`
+  (shapes verified against the CLI 2.1.330 schema; no live limited transcript yet). A later
+  allowed event or normal assistant message clears it; free text is never matched.
 - **`autobuild/paths.py`** — the frozen `Paths` dataclass.
 
 ### The session lifecycle / sentinel protocol (the core data flow)
@@ -309,9 +320,10 @@ of time" from "agent hit a wall". A dependent of a terminal `timeout` task sees 
 states (`is_terminal` / the `TERMINAL` set); everything else counts as in-flight, which is what
 keeps the loop running. (Because a re-queue creates newly-runnable work mid-`_harvest`, the loop's
 settle check yields back to claiming when `runnable_tasks` is non-empty rather than terminating on
-"nothing running" alone.) `INTERRUPTED` is a synthetic sentinel (operator signal, or a halt
-killing in-flight sessions): the reaper re-queues the task to `todo` like a timeout re-queue but
-**without** touching `retries.json`, so an interrupt never spends timeout budget. The leak check
+"nothing running" alone.) `INTERRUPTED` (operator signal, or a halt killing in-flight sessions)
+and `RATE_LIMITED` (usage/rate limit) are synthetic sentinels: the reaper re-queues the task to
+`todo` like a timeout re-queue but **without** touching `retries.json`, so neither spends timeout
+budget (a rate limit needs no budget of its own: the run stops claiming on the first). The leak check
 still runs first. The template task file documents the human vocabulary
 `todo | claimed | in-progress | review | done | blocked`; the harness also applies `timeout`.
 `invalid` is read-only: `load_task` assigns it in memory to an unparseable task file and the
