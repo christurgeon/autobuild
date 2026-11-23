@@ -229,3 +229,16 @@ def test_cli_run_sigint_exits_130(git_repo, git, stub_bin, monkeypatch):
             raise AssertionError("session process group still alive")
         except ProcessLookupError:
             pass
+
+
+def test_main_line_buffers_redirected_stdout(tmp_path):
+    """Live run 2026-11-22: with stdout redirected to a file, `autobuild run` log lines
+    arrived minutes late (block buffering), so a tail of the log showed nothing."""
+    import subprocess
+    import sys
+    code = ("import sys; from autobuild import cli; cli.main([]); "
+            "sys.stderr.write(str(sys.stdout.line_buffering))")
+    r = subprocess.run([sys.executable, "-c", code], cwd=tmp_path,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stderr.endswith("True")

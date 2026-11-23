@@ -122,6 +122,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Line-buffer stdout so a redirected or piped run (`> run.log`, `| tee`, CI) shows
+    # each log line as it happens instead of in late blocks.
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(line_buffering=True)
     parser = build_parser()
     args = parser.parse_args(argv)
     paths = Paths.from_cwd()
