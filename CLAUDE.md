@@ -311,7 +311,9 @@ This is the part that requires reading multiple files to understand:
    files alone (no PID file needed) instead of stranding orphans for a human to reset.
 
 The loop terminates when nothing is running **and** nothing is runnable (backlog drained, or
-settled behind blocked/unsatisfiable deps), or when `max_iterations` trips. When a pass makes no
+settled behind blocked/unsatisfiable deps), or when `max_iterations` trips.
+"Drained" means every task is terminal, not that every task succeeded: `_report_drained` prints
+"backlog drained — COMPLETE" only when all are `done`, else the per-status counts. When a pass makes no
 progress it blocks on the next live session finishing instead of busy-sleeping.
 
 ### Task status state machine

@@ -9,6 +9,7 @@ import contextlib
 import signal
 import subprocess
 import time
+from collections import Counter
 
 from . import interrupt
 from .common import _classify_sentinel, _notify, log, ok, warn
@@ -122,6 +123,17 @@ def _rate_limited(paths: Paths, config: Config, run_sids: set[str],
         warn(f"usage/rate limit hit — {msg}")
         _notify(config, "rate_limited", msg)
     return bool(hits)
+
+
+def _report_drained(tasks) -> None:
+    """Headline for a drained backlog: COMPLETE only if every task is `done`; otherwise
+    name the counts, so a blocked or timed-out task is not reported as success."""
+    counts = Counter(t.status for t in tasks)
+    if set(counts) <= {"done"}:
+        ok("backlog drained — COMPLETE")
+        return
+    parts = [f"{counts.pop('done', 0)} done"] + [f"{n} {s}" for s, n in sorted(counts.items())]
+    warn(f"backlog drained: {', '.join(parts)} — see 'autobuild status'")
 
 
 def _next_wait(running: list[RunningSession], sleep_seconds: float, now: float) -> float:
@@ -347,7 +359,7 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession],
                      f"{len(pending)} unfinished task(s) — see 'autobuild status'")
                 return "max_iterations"
             elif not pending:
-                ok("backlog drained — COMPLETE")
+                _report_drained(tasks)
                 return "drained"
             else:
                 stuck = stuck_tasks(tasks, index)
