@@ -283,9 +283,11 @@ def test_task_without_model_has_none(tmp_path, extra):
     assert t.model is None
 
 
-@pytest.mark.parametrize("value", ["''", "'  '", "42", "[a, b]"])
+@pytest.mark.parametrize("value", ["''", "'  '", "42", "[a, b]",
+                                   "--dangerously-skip-permissions", "'claude sonnet'"])
 def test_task_with_bad_model_is_invalid(tmp_path, value):
-    """A typo'd model would otherwise fail only when `claude` starts, as a BLOCKED task."""
+    """A non-string, blank, flag-like or multi-word value is rejected at load (named by
+    doctor) instead of reaching the `claude` argv. The model NAME itself is not checked."""
     t = tasks.load_task(write(tmp_path, "task-001.md",
                               f"---\nid: task-001\nstatus: todo\nmodel: {value}\n---\n"))
     assert t.status == "invalid"

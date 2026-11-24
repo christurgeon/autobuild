@@ -347,7 +347,8 @@ harness never writes it. It is non-terminal and never runnable, so a backlog wit
   `invalid` and never scheduled); a file without frontmatter is ignored. Ids must be unique — a
   duplicated id is never scheduled, never satisfies a dependency, and defers its reap.
   An optional `model:` overrides `config.model` for that task's session (`Task.model`;
-  recorded in `meta.json`); a non-string or blank value makes the file `invalid`.
+  recorded in `meta.json`). A bare `model:` or `null` means no override; a non-string,
+  empty, multi-word or `-`-prefixed value makes the file `invalid`.
 - **Keep the reaper idempotent.** Integration happens *before* the task is marked `done`, and
   the `reaped.json` marker guards against double-integration / double follow-up filing. Preserve
   both properties when touching `reaper.py` / `integrate.py`.

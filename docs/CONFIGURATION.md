@@ -86,9 +86,14 @@ model: claude-sonnet-5-5   # optional; overrides config.yml `model` for this tas
 ---
 ```
 
-The value is passed to `claude --model` and recorded in the session's `meta.json`. It must be
-a non-empty string; any other value makes the task file `invalid` (never scheduled, named by
-`autobuild doctor`). An empty `model:` means no override.
+The value is passed to `claude --model` and recorded in the session's `meta.json`. A bare
+`model:` or `model: null` means no override. A value that is not a single word (for example
+`model: ""`, a number, or a value starting with `-`) makes the task file `invalid`: it is never
+scheduled and `autobuild doctor` names it. The model name itself is not checked; a misspelled
+name fails when the session starts and the task is blocked.
+
+A usage or rate limit on any session stops the run from claiming new tasks, whatever model
+those tasks use.
 
 ## Notifications
 

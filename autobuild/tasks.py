@@ -93,6 +93,12 @@ def _task_from(data: dict, path: Path) -> Task:
     )
 
 
+def _valid_model(value) -> bool:
+    # One token that cannot be read as a flag: the value goes into the `claude` argv.
+    s = value.strip() if isinstance(value, str) else ""
+    return bool(s) and not s.startswith("-") and len(s.split()) == 1
+
+
 def _coerce_model(value) -> str | None:
     return (value.strip() or None) if isinstance(value, str) else None
 
@@ -143,8 +149,8 @@ def load_task(path: Path) -> Task | None:
     if not _STATUS_LINE_RE.search(m.group(1)):
         return _invalid(text, path, "no status: line in frontmatter")
     model = data.get("model")
-    if model is not None and not (isinstance(model, str) and model.strip()):
-        return _invalid(text, path, "model: must be a non-empty string (or omitted)")
+    if model is not None and not _valid_model(model):
+        return _invalid(text, path, "model: must be one word not starting with '-' (or omitted)")
     return _task_from(data, path)
 
 
