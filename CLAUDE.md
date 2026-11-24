@@ -164,10 +164,14 @@ Module responsibilities:
 - **`autobuild/integrate.py`** — `integrate` (`pr` / `auto-merge` / `branch`), the bounded
   push/PR retry-with-backoff helpers (`_push_branch`, `_open_pr`, permanent-failure classifiers),
   and `_post_merge_verify` (the auto-merge combined-tree gate). Before an auto-merge, `integrate`
-  raises `BaseBranchNotCheckedOut` if the main checkout is not on `base_branch`. `_undo_merge`
-  undoes a merge that fails the post-merge checks with `git reset --merge` (fallback: reset the
-  merge-footprint paths to HEAD, then `reset --merge` again; raises `MergeUndoFailed` to halt if
-  that fails). It never uses `reset --hard`, which would revert uncommitted `tasks/` status.
+  raises `BaseBranchNotCheckedOut` if the main checkout is not on `base_branch`. The post-merge
+  checks run in a temporary detached worktree at the merge commit
+  (`.autobuild/worktrees/<sid>-post-merge`, always removed), never in the main checkout, so
+  files they generate cannot dirty the base tree; if that worktree cannot be created the merge
+  is undone (fail closed). `_undo_merge` undoes a merge that fails the post-merge checks with
+  `git reset --merge`, and raises `MergeUndoFailed` to halt if that refuses (a local edit to a
+  merged path in the main checkout — someone's work, never discarded). It never uses
+  `reset --hard`, which would revert uncommitted `tasks/` status.
 - **`autobuild/reaper.py`** — `reap_session` / `_reap_session_locked` (under a per-session
   `_session_reap_lock`), `_handle_timeout`, `_requeue_fresh` (re-queue a killed session's task
   WITHOUT a `retries.json` entry — used for `INTERRUPTED`), `file_followups`, `reap_all` (takes
@@ -280,9 +284,9 @@ This is the part that requires reading multiple files to understand:
    `auto-merge` the reaper first requires `base_branch` to be checked out (else
    `BaseBranchNotCheckedOut` halts before the merge; the session stays reapable), and a second
    gate (`_post_merge_verify`, opt-out `verify_after_merge`) re-runs the
-   checks against the **combined base tree** after the `--no-ff` merge and **undoes the merge with
-   `git reset --merge`** if they fail (fallback: reset the merge-footprint paths to HEAD, then
-   `reset --merge` again; halts with `MergeUndoFailed` if that fails) — catching semantic merge skew two independently-green
+   checks against the **combined tree** (in a temporary worktree at the merge commit) after the
+   `--no-ff` merge and **undoes the merge with `git reset --merge`** if they fail (halts with
+   `MergeUndoFailed` if that refuses) — catching semantic merge skew two independently-green
    branches can produce with no textual conflict. If they
    pass it **integrates** (`integrate` → `pr` via `gh` / `auto-merge` / `branch`) and only then
    `set_status`es the task `done` — so a failed auto-merge leaves the task `blocked`, not falsely

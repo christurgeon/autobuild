@@ -760,21 +760,39 @@ def test_post_merge_revert_preserves_uncommitted_task_status(git_repo, git):
     assert _branch_exists(git, git_repo, "task-001")
 
 
-def test_post_merge_revert_falls_back_when_checks_dirty_merged_file(git_repo, git):
+def test_post_merge_checks_run_outside_main_checkout(git_repo, git):
+    """Live run 2026-11-22: post-merge checks ran in the main checkout and left untracked
+    __pycache__/, so the next `run` refused to start (dirty base). They now run in a
+    temporary worktree at the merge commit, which is removed afterwards."""
+    paths = setup(git_repo)
+    _commit_tasks(paths, git, "task-001")
+    _worktree_with_commit(paths, git, broken=False)
+    sdir = make_session(paths, "task-001", "COMPLETE", commit="x")
+    cfg = Config(integration="auto-merge",
+                 checks=["mkdir -p cache && touch cache/junk && test -f feature.txt"])
+
+    assert reap_session(sdir, cfg, paths) is True
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"
+    assert not (git_repo / "cache").exists()
+    assert all(p.startswith("tasks/") for p in _porcelain_paths(git, git_repo))
+    assert git(git_repo, "worktree", "list").stdout.count("\n") == 1
+    assert not any(paths.worktrees_dir.iterdir())
+
+
+def test_post_merge_failing_check_cannot_dirty_main_checkout(git_repo, git):
     paths = setup(git_repo)
     _commit_tasks(paths, git, "task-001", "task-002")
     sdir = _skew_setup(paths, git)
     set_status(paths.tasks_dir / "task-002.md", "done")
     pre_merge = git(git_repo, "rev-parse", "HEAD").stdout.strip()
-    # The check dirties a file the merge brought in, so a plain `reset --merge` refuses.
     cfg = Config(integration="auto-merge", checks=[f"echo x >> feature.txt; {_SKEW_CHECK}"])
 
     assert reap_session(sdir, cfg, paths) is True
     assert git(git_repo, "rev-parse", "HEAD").stdout.strip() == pre_merge
-    assert "merge task-001" not in git(git_repo, "log", "--oneline", "main").stdout
     assert not (git_repo / "feature.txt").exists()
     assert read_task(paths.tasks_dir / "task-002.md").status == "done"
     assert all(p.startswith("tasks/") for p in _porcelain_paths(git, git_repo))
+    assert not any(paths.worktrees_dir.iterdir())
 
 
 def test_post_merge_revert_keeps_unrelated_dirty_tracked_file(git_repo, git):
@@ -787,23 +805,6 @@ def test_post_merge_revert_keeps_unrelated_dirty_tracked_file(git_repo, git):
 
     assert reap_session(sdir, cfg, paths) is True
     assert (git_repo / "notes.txt").read_text() == "human edit\n"
-
-
-def test_post_merge_fallback_keeps_unrelated_dirty_tracked_file(git_repo, git):
-    paths = setup(git_repo)
-    (git_repo / "notes.txt").write_text("v1\n")
-    _commit_tasks(paths, git, "task-001", "task-002")
-    sdir = _skew_setup(paths, git)
-    set_status(paths.tasks_dir / "task-002.md", "done")
-    (git_repo / "notes.txt").write_text("human edit\n")
-    pre_merge = git(git_repo, "rev-parse", "HEAD").stdout.strip()
-    cfg = Config(integration="auto-merge", checks=[f"echo x >> feature.txt; {_SKEW_CHECK}"])
-
-    assert reap_session(sdir, cfg, paths) is True
-    assert git(git_repo, "rev-parse", "HEAD").stdout.strip() == pre_merge
-    assert not (git_repo / "feature.txt").exists()
-    assert (git_repo / "notes.txt").read_text() == "human edit\n"
-    assert read_task(paths.tasks_dir / "task-002.md").status == "done"
 
 
 def test_post_merge_undo_failure_halts(git_repo, git, monkeypatch):
@@ -2319,3 +2320,26 @@ def test_reconcile_orphan_with_limit_evidence_becomes_rate_limited(git_repo):
     reap_all(Config(integration="branch"), paths)
     assert read_task(paths.tasks_dir / "task-001.md").status == "todo"
     assert retry_count(paths.retries_ledger, "task-001") == 0
+
+
+def test_post_merge_worktree_add_failure_reverts_and_blocks(git_repo, git, monkeypatch):
+    """If the temporary worktree cannot be created, the combined tree is unverified, so the
+    merge is undone and the task blocked (fail closed)."""
+    paths = setup(git_repo)
+    _commit_tasks(paths, git, "task-001")
+    _worktree_with_commit(paths, git, broken=False)
+    sdir = make_session(paths, "task-001", "COMPLETE", commit="x")
+    pre_merge = git(git_repo, "rev-parse", "HEAD").stdout.strip()
+    real_git = integrate_mod._git
+
+    def fake_git(root, *args):
+        if args[:2] == ("worktree", "add"):
+            return subprocess.CompletedProcess(args, 128, "", "fatal: no space")
+        return real_git(root, *args)
+
+    monkeypatch.setattr(integrate_mod, "_git", fake_git)
+    cfg = Config(integration="auto-merge", checks=["true"])
+    assert reap_session(sdir, cfg, paths) is True
+    assert git(git_repo, "rev-parse", "HEAD").stdout.strip() == pre_merge
+    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+    assert "no space" in (sdir / "post-merge-checks.log").read_text()

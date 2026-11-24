@@ -48,6 +48,8 @@ verify_after_merge: true      # auto-merge only: after a clean merge, re-run `ch
                               # green branches can't); on failure the merge is reverted
                               # (base reset to its pre-merge commit; uncommitted task
                               # status is kept) and the task blocked. false -> land merges unverified.
+                              # Runs in a temporary worktree at the merge commit,
+                              # so generated files never land in your checkout.
 
 claude_cmd: claude            # override if your CLI binary is named differently
 

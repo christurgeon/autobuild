@@ -15,7 +15,7 @@ from .config import Config
 from .guards import BaseBranchNotCheckedOut, MergeUndoFailed
 from .paths import Paths
 from .verify import _write_checks_log
-from .worktree import branch_name
+from .worktree import branch_name, remove_worktree
 
 # Markers in a failed `git push` stderr that mean a PERMANENT failure (auth / no remote).
 # Retrying these only wastes time, so a push whose stderr matches stays single-shot.
@@ -207,54 +207,54 @@ def integrate(tid: str, config: Config, paths: Paths, sdir: Path, *, sleep=time.
 
 def _post_merge_verify(tid: str, branch: str, config: Config, paths: Paths, sdir: Path,
                        pre_merge_sha: str) -> tuple[bool, str]:
-    """After an auto-merge lands, re-run config.checks against the COMBINED base working
-    tree (paths.root). Two independently-green branches can still merge into a red base with
-    no textual conflict (semantic skew: A renames a helper, B adds a caller of the old name);
-    the pre-merge gate only ever saw each branch alone, so this is the only place that catches
-    it. On the first failing check, `_undo_merge` removes the merge commit (never leave base
-    red) while keeping uncommitted task status and other local edits, write a forensic log,
-    and report failure — the reaper then blocks the task and keeps the branch. Skipped (merge stands) when verify_after_merge is off or
-    there are no checks; independent of verify_checks (which gates the pre-merge worktree run)."""
+    """After an auto-merge lands, re-run config.checks against the COMBINED tree. Two
+    independently-green branches can still merge into a red base with no textual conflict
+    (semantic skew: A renames a helper, B adds a caller of the old name); the pre-merge gate
+    only ever saw each branch alone, so this is the only place that catches it.
+
+    The checks run in a temporary detached worktree at the merge commit, never in the main
+    checkout: files they generate (caches, build output) would otherwise make the base tree
+    dirty and the next `run` refuse to start. On the first failing check, write a forensic
+    log, `_undo_merge`, and report failure — the reaper then blocks the task and keeps the
+    branch. Skipped (merge stands) when verify_after_merge is off or there are no checks;
+    independent of verify_checks (which gates the pre-merge worktree run)."""
     base = config.base_branch
     landed = f"merged {branch} into {base}"
     if not config.verify_after_merge or not config.checks:
         return True, landed
-    for cmd in config.checks:
-        r = subprocess.run(cmd, shell=True, cwd=str(paths.root),
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            _write_checks_log(sdir, cmd, r.returncode, r.stdout, r.stderr,
-                              name="post-merge-checks.log")
-            _undo_merge(paths, pre_merge_sha)
-            return False, f"post-merge checks failed for {branch}; merge reverted"
+    name = f"{sdir.name}-post-merge"
+    remove_worktree(paths, name)  # a crash may have left one behind
+    paths.worktrees_dir.mkdir(parents=True, exist_ok=True)
+    tree = paths.worktrees_dir / name
+    r = _git(paths.root, "worktree", "add", "--detach", str(tree), "HEAD")
+    if r.returncode != 0:  # cannot verify the combined tree, so do not keep the merge
+        _write_checks_log(sdir, "(git worktree add)", r.returncode, r.stdout, r.stderr,
+                          name="post-merge-checks.log")
+        _undo_merge(paths, pre_merge_sha)
+        return False, f"post-merge checks could not run for {branch}; merge reverted"
+    try:
+        for cmd in config.checks:
+            r = subprocess.run(cmd, shell=True, cwd=str(tree), capture_output=True, text=True)
+            if r.returncode != 0:
+                _write_checks_log(sdir, cmd, r.returncode, r.stdout, r.stderr,
+                                  name="post-merge-checks.log")
+                _undo_merge(paths, pre_merge_sha)
+                return False, f"post-merge checks failed for {branch}; merge reverted"
+    finally:
+        remove_worktree(paths, name)
     return True, landed
 
 
 def _undo_merge(paths: Paths, pre_merge_sha: str) -> None:
-    """Move base back to `pre_merge_sha` without losing uncommitted work outside the merge.
-
-    `reset --hard` would revert the uncommitted `tasks/` status writes (every in-flight task)
-    and any human edit. `reset --merge` keeps them, but refuses when a check modified a path
-    the merge touched. Those edits belong to the tree being discarded, so the fallback puts
-    each merge-footprint path back to HEAD and retries. A dirty `tasks/` file can't be in the
-    footprint: git refuses a merge that would overwrite it. Raises MergeUndoFailed if the
-    second reset also fails."""
-    root = paths.root
-    if _git(root, "reset", "--merge", pre_merge_sha).returncode == 0:
-        return
-    merge_sha = _git(root, "rev-parse", "HEAD").stdout.strip()
-    diff = _git(root, "diff", "-z", "--name-only", pre_merge_sha, "HEAD").stdout
-    footprint = [p for p in diff.split("\0") if p]
-    for rel in footprint:
-        if _git(root, "cat-file", "-e", f"HEAD:{rel}").returncode == 0:
-            _git(root, "checkout", "HEAD", "--", rel)
-        else:
-            (root / rel).unlink(missing_ok=True)  # merge deleted it; a check re-created it
-    r = _git(root, "reset", "--merge", pre_merge_sha)
+    """Move base back to `pre_merge_sha` with `git reset --merge`, which keeps uncommitted
+    work outside the merge (`reset --hard` would revert the uncommitted `tasks/` status
+    writes and any human edit). It refuses only when the main checkout has a local edit to a
+    path the merge touched; that edit is someone's work, so halt (MergeUndoFailed) rather
+    than discard it."""
+    r = _git(paths.root, "reset", "--merge", pre_merge_sha)
     if r.returncode != 0:
+        merge_sha = _git(paths.root, "rev-parse", "HEAD").stdout.strip()
         raise MergeUndoFailed(
             f"could not undo merge {merge_sha} after failed post-merge checks: "
             f"{r.stderr.strip()} — base is left on the merge commit; run "
             f"`git reset --merge {pre_merge_sha}` by hand, then re-run")
-    warn(f"post-merge checks edited merged path(s) {', '.join(footprint)}; "
-         f"those edits were discarded with the merge")

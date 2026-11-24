@@ -64,6 +64,8 @@ verify_checks: true
 # (semantic skew) — this catches that. On failure the merge is reverted (base reset to its
 # pre-merge commit; uncommitted task status is kept) and the task is `blocked` with its branch kept (see
 # <session>/post-merge-checks.log). Set to false to land merges without the combined re-run.
+# The checks run in a temporary worktree at the merge commit, so files they generate never
+# land in your checkout.
 verify_after_merge: true
 
 claude_cmd: claude            # override if your Claude CLI binary differs
