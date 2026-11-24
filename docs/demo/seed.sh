@@ -21,7 +21,7 @@ chmod +x "$DEST/bin/claude"
 
 # Config tuned for a tidy, network-free demo.
 cat > .autobuild/config.yml <<'YAML'
-model: claude-opus-4-8
+model: claude-opus-5-5
 max_parallel: 3
 base_branch: main
 max_iterations: 50

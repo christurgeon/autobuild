@@ -18,7 +18,7 @@ the reaper:
     uv run python tools/live_smoke.py
 
 Environment knobs (all optional):
-    AUTOBUILD_SMOKE_MODEL   override the model (default: the template default, opus-4-8)
+    AUTOBUILD_SMOKE_MODEL   override the model (default: the template default, claude-opus-5-5)
     AUTOBUILD_SMOKE_DIR     build the throwaway project here (default: a fresh mkdtemp)
     AUTOBUILD_SMOKE_KEEP    "1" -> keep the project dir even on success (default: remove on
                             success, always keep on failure for inspection)
@@ -107,7 +107,7 @@ def _scaffold(project: Path) -> Paths:
     cfg = cfg.replace("max_parallel: 3", "max_parallel: 1")
     model = os.environ.get("AUTOBUILD_SMOKE_MODEL")
     if model:
-        cfg = cfg.replace("model: claude-opus-4-8", f"model: {model}")
+        cfg = cfg.replace("model: claude-opus-5-5", f"model: {model}")
     paths.config_file.write_text(cfg)
 
     # Replace the example task with our one trivial, unambiguous task.

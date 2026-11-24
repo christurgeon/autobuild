@@ -8,7 +8,7 @@ from autobuild.paths import Paths
 TEMPLATE_CONFIG = """\
 # autobuild configuration. Safe to edit; the loop re-reads it each iteration.
 
-model: claude-opus-4-8        # passed to `claude --model`
+model: claude-opus-5-5        # passed to `claude --model`
 max_parallel: 3               # WIP limit / number of concurrent worktrees
 base_branch: main             # feature branches fork from and merge into this
 max_iterations: 100           # global safety stop for the outer loop
@@ -27,7 +27,7 @@ claude_cmd: claude            # override if your Claude CLI binary differs
 def test_defaults_when_file_missing(tmp_path):
     cfg = load_config(tmp_path / "nope.yml")
     assert cfg == Config()
-    assert cfg.model == "claude-opus-4-8"
+    assert cfg.model == "claude-opus-5-5"
     assert cfg.max_parallel == 3
     assert cfg.base_branch == "main"
     assert cfg.max_iterations == 100
@@ -47,7 +47,7 @@ def test_parses_template_config(tmp_path):
     p = tmp_path / "config.yml"
     p.write_text(TEMPLATE_CONFIG)
     cfg = load_config(p)
-    assert cfg.model == "claude-opus-4-8"
+    assert cfg.model == "claude-opus-5-5"
     assert cfg.max_parallel == 3 and isinstance(cfg.max_parallel, int)
     assert cfg.max_iterations == 100 and isinstance(cfg.max_iterations, int)
     assert cfg.integration == "pr"
@@ -525,7 +525,7 @@ def test_unknown_key_warns_but_does_not_abort(tmp_path, capsys):
 
 def test_valid_config_loads_with_no_warnings(tmp_path, capsys):
     body = (
-        "model: claude-opus-4-8\n"
+        "model: claude-opus-5-5\n"
         "max_parallel: 4\n"
         "base_branch: develop\n"
         "max_iterations: 10\n"
@@ -536,7 +536,7 @@ def test_valid_config_loads_with_no_warnings(tmp_path, capsys):
     cfg = load_config(_write(tmp_path, body))
     captured = capsys.readouterr()
     assert cfg == Config(
-        model="claude-opus-4-8",
+        model="claude-opus-5-5",
         max_parallel=4,
         base_branch="develop",
         max_iterations=10,
