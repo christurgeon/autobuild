@@ -6,7 +6,7 @@ Everything autobuild does is controlled by `.autobuild/config.yml`, written by
 with exit 2 *before* any session spawns.
 
 ```yaml
-model: claude-opus-4-8        # passed to `claude --model`
+model: claude-opus-5-5        # passed to `claude --model`
 max_parallel: 3               # WIP limit / number of concurrent worktrees
 base_branch: main             # what feature branches fork from and merge into
 max_iterations: 100           # global safety stop for the outer loop

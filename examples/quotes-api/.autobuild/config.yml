@@ -2,7 +2,7 @@
 # (Trimmed to the keys this example sets; every other key falls back to its
 # documented default — see autobuild/templates/config.yml for the full reference.)
 
-model: claude-opus-4-8
+model: claude-opus-5-5
 max_parallel: 3               # task-003 and task-004 can run at once
 base_branch: main
 max_iterations: 50

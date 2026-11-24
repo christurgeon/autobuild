@@ -19,7 +19,7 @@ VALID_PERMISSION_MODES = ("plan", "default", "acceptEdits", "bypassPermissions")
 
 @dataclass(frozen=True)
 class Config:
-    model: str = "claude-opus-4-8"
+    model: str = "claude-opus-5-5"
     max_parallel: int = 3
     base_branch: str = "main"
     max_iterations: int = 100
