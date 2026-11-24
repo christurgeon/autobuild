@@ -30,6 +30,7 @@ Exit code 0 = every assertion passed; 1 = a failure (the project dir is left for
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -107,7 +108,7 @@ def _scaffold(project: Path) -> Paths:
     cfg = cfg.replace("max_parallel: 3", "max_parallel: 1")
     model = os.environ.get("AUTOBUILD_SMOKE_MODEL")
     if model:
-        cfg = cfg.replace("model: claude-opus-5-5", f"model: {model}")
+        cfg = re.sub(r"(?m)^model:[^#\n]*", f"model: {model}  ", cfg, count=1)
     paths.config_file.write_text(cfg)
 
     # Replace the example task with our one trivial, unambiguous task.

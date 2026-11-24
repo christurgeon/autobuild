@@ -545,3 +545,13 @@ def test_valid_config_loads_with_no_warnings(tmp_path, capsys):
         claude_cmd="claude",
     )
     assert captured.out == "" and captured.err == ""
+
+
+def test_packaged_template_matches_config_defaults():
+    """The packaged config.yml and Config() must not drift (e.g. a model bump made in one
+    place only). `checks` differs on purpose: the template carries a placeholder."""
+    import dataclasses
+    import importlib.resources as ir
+    with ir.as_file(ir.files("autobuild") / "templates" / "config.yml") as path:
+        loaded = load_config(path)
+    assert dataclasses.replace(loaded, checks=Config().checks) == Config()
