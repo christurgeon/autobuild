@@ -319,6 +319,7 @@ def spawn_session(task: Task, config: Config, paths: Paths) -> RunningSession:
     # session always has a meta for crash recovery; pgid is added once the child exists.
     # Snapshot base_branch BEFORE the agent runs so the reaper can later prove the
     # session never advanced it (the worktree-escape leak check in loop.base_leak_commits).
+    model = task.model or config.model
     meta = {
         "session": sid,
         "task": tid,
@@ -328,6 +329,7 @@ def spawn_session(task: Task, config: Config, paths: Paths) -> RunningSession:
         "task_file": str(sdir / task.path.name),
         "worktree": str(wt),
         "branch": branch_name(tid),
+        "model": model,
         "base_branch": config.base_branch,
         "base_sha": head_sha(paths.root, config.base_branch),
         "status": "in-progress",
@@ -342,7 +344,7 @@ def spawn_session(task: Task, config: Config, paths: Paths) -> RunningSession:
     err = open(sdir / "session.err", "w")
     try:
         proc = Popen(
-            [config.claude_cmd, "-p", prompt, "--model", config.model,
+            [config.claude_cmd, "-p", prompt, "--model", model,
              # stream-json flushes one JSON event per line to the redirected session.out as
              # the agent works, so a long run is observable live (issue #40 — the default
              # text format buffers session.out to 0 bytes for the whole run); its terminal

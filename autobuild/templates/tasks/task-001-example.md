@@ -4,6 +4,7 @@ title: Example task — replace me
 status: todo          # todo | claimed | in-progress | review | done | blocked (harness also sets: timeout)
 priority: 1           # lower number = higher priority
 depends_on: []        # list of task ids that must be `done` first, e.g. [task-000]
+# model: claude-sonnet-5-5   # optional: overrides config.yml `model` for this task
 ---
 
 ## Goal

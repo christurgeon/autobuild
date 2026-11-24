@@ -46,6 +46,7 @@ class Task:
     priority: int
     depends_on: list[str]
     path: Path
+    model: str | None = None  # per-task `model:` override of config.model
     error: str | None = None  # why the file is INVALID; None for a valid task
 
 
@@ -88,7 +89,18 @@ def _task_from(data: dict, path: Path) -> Task:
         priority=_coerce_priority(data.get("priority")),
         depends_on=_coerce_deps(data.get("depends_on")),
         path=path,
+        model=_coerce_model(data.get("model")),
     )
+
+
+def _valid_model(value) -> bool:
+    # One token that cannot be read as a flag: the value goes into the `claude` argv.
+    s = value.strip() if isinstance(value, str) else ""
+    return bool(s) and not s.startswith("-") and len(s.split()) == 1
+
+
+def _coerce_model(value) -> str | None:
+    return (value.strip() or None) if isinstance(value, str) else None
 
 
 def _recover_id(text: str, path: Path) -> str:
@@ -136,6 +148,9 @@ def load_task(path: Path) -> Task | None:
         return _invalid(text, path, "frontmatter is not a mapping")
     if not _STATUS_LINE_RE.search(m.group(1)):
         return _invalid(text, path, "no status: line in frontmatter")
+    model = data.get("model")
+    if model is not None and not _valid_model(model):
+        return _invalid(text, path, "model: must be one word not starting with '-' (or omitted)")
     return _task_from(data, path)
 
 

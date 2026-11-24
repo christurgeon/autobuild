@@ -363,3 +363,29 @@ def test_session_env_drops_git_config_injection(monkeypatch):
     assert "GIT_CONFIG_PARAMETERS" not in env
     assert env["GIT_CONFIG_GLOBAL"] == "/tmp/gc"      # file pointer, benign -> kept
     assert env["GIT_COMMITTER_NAME"] == "ab"          # commit identity -> kept
+
+
+def test_spawn_uses_task_model_over_config_and_records_it(git_repo, monkeypatch, stub_pgid):
+    paths = make_project(git_repo)
+    p = paths.tasks_dir / "task-001.md"
+    p.write_text("---\nid: task-001\ntitle: t\nstatus: todo\npriority: 1\ndepends_on: []\n"
+                 "model: claude-sonnet-5-5\n---\n\n## Goal\nx\n", encoding="utf-8")
+    captured = {}
+
+    def fake_popen(argv, **kw):
+        captured["argv"] = argv
+        return type("P", (), {"poll": lambda s: None})()
+
+    monkeypatch.setattr(session_mod, "Popen", fake_popen)
+    rs = spawn_session(read_task(p), Config(model="claude-opus-5-5"), paths)
+    argv = captured["argv"]
+    assert argv[argv.index("--model") + 1] == "claude-sonnet-5-5"
+    assert json.loads((rs.sdir / "meta.json").read_text())["model"] == "claude-sonnet-5-5"
+
+
+def test_spawn_records_config_model_when_task_has_none(git_repo, monkeypatch, stub_pgid):
+    paths = make_project(git_repo)
+    monkeypatch.setattr(session_mod, "Popen",
+                        lambda *a, **k: type("P", (), {"poll": lambda s: None})())
+    rs = spawn_session(write_task(paths), Config(model="claude-opus-5-5"), paths)
+    assert json.loads((rs.sdir / "meta.json").read_text())["model"] == "claude-opus-5-5"
