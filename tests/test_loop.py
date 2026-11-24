@@ -2319,3 +2319,25 @@ def test_reconcile_orphan_with_limit_evidence_becomes_rate_limited(git_repo):
     reap_all(Config(integration="branch"), paths)
     assert read_task(paths.tasks_dir / "task-001.md").status == "todo"
     assert retry_count(paths.retries_ledger, "task-001") == 0
+
+
+# ---- drained headline --------------------------------------------------------
+
+def _t(tid, status):
+    from autobuild.tasks import Task
+    return Task(id=tid, title=tid, status=status, priority=1, depends_on=[], path=None)
+
+
+def test_report_drained_complete_only_when_all_done(capsys):
+    from autobuild import supervisor as sup_mod
+    sup_mod._report_drained([_t("task-001", "done"), _t("task-002", "done")])
+    assert "backlog drained — COMPLETE" in capsys.readouterr().out
+
+
+def test_report_drained_names_timeout_and_blocked(capsys):
+    from autobuild import supervisor as sup_mod
+    sup_mod._report_drained([_t("task-001", "done"), _t("task-002", "timeout"),
+                             _t("task-003", "blocked")])
+    out = capsys.readouterr().out
+    assert "COMPLETE" not in out
+    assert "blocked=1  done=1  timeout=1" in out

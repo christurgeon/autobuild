@@ -132,8 +132,8 @@ def _report_drained(tasks) -> None:
     if set(counts) <= {"done"}:
         ok("backlog drained — COMPLETE")
         return
-    parts = [f"{counts.pop('done', 0)} done"] + [f"{n} {s}" for s, n in sorted(counts.items())]
-    warn(f"backlog drained: {', '.join(parts)} — see 'autobuild status'")
+    shown = "  ".join(f"{s}={n}" for s, n in sorted(counts.items()))  # the digest's format
+    warn(f"backlog drained with unfinished work: {shown} — see 'autobuild status'")
 
 
 def _next_wait(running: list[RunningSession], sleep_seconds: float, now: float) -> float:
@@ -245,7 +245,8 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession],
     with the live set IN PLACE (`running[:] = ...`) so a caller catching RunHalted
     can still see — and kill — what was running when the halt fired.
 
-    Returns the terminal reason the run ended for — `drained` (backlog empty),
+    Returns the terminal reason the run ended for — `drained` (every task terminal;
+    not necessarily all `done`),
     `settled` (only blocked/unsatisfiable work left), or one of the budget caps with work
     left unstarted: `max_iterations`, `run_budget_seconds`, `run_budget_usd` — so the caller
     records it in the run summary instead of re-deriving it — `rate_limited` after a

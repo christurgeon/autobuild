@@ -193,7 +193,7 @@ def test_e2e_drain_with_blocked_task_is_not_reported_complete(git_repo, stub_bin
 
     out = capsys.readouterr().out
     assert "backlog drained — COMPLETE" not in out
-    assert "backlog drained: 1 done, 1 blocked" in out
+    assert "backlog drained with unfinished work: blocked=1  done=1" in out
     assert "run ended: drained" in out  # the run-end reason is unchanged
 
 
