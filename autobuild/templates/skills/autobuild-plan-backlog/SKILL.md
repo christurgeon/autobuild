@@ -35,6 +35,8 @@ point the user at the **autobuild-author-goal** skill first.
    single fresh session, large enough to be worth a commit. For each task produce:
    - `id` (`task-NNN`, sequential), `title`, `priority` (lower = higher), `depends_on`
      (only real prerequisites — keep the graph a DAG).
+     Optionally `model` (e.g. `claude-sonnet-5-5`) to override config.yml's model for a
+     simple task; omit it to use the default.
    - **Goal** — the single self-contained piece of work.
    - **Acceptance criteria** — concrete and checkable, always including a line for the
      project's configured checks (read them from `.autobuild/config.yml`, e.g. "`ruff check

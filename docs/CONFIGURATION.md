@@ -70,6 +70,26 @@ The permission keys (`dangerously_bypass_permissions`, `require_sandbox_for_bypa
 `permission_mode`, `allowed_tools`) decide how much a spawned session may do unattended —
 read **[SECURITY.md](SECURITY.md)** before changing them or running unattended.
 
+## Per-task model
+
+`model` is the default for every session. A task can override it with an optional `model:`
+line in its frontmatter, for example to run simple tasks on a cheaper model:
+
+```yaml
+---
+id: task-004
+title: add case conversion helpers
+status: todo
+priority: 3
+depends_on: []
+model: claude-sonnet-5-5   # optional; overrides config.yml `model` for this task only
+---
+```
+
+The value is passed to `claude --model` and recorded in the session's `meta.json`. It must be
+a non-empty string; any other value makes the task file `invalid` (never scheduled, named by
+`autobuild doctor`). An empty `model:` means no override.
+
 ## Notifications
 
 A long, walk-away `run` can ping you when something worth knowing happens — without you

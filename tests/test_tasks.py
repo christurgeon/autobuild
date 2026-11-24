@@ -265,3 +265,28 @@ def test_next_task_id_reserves_invalid_file_id(tmp_path):
     write(tmp_path, "task-001.md", "---\nid: task-001\nstatus: done\n---\n")
     write(tmp_path, "task-009.md", "---\nid: task-009\ntitle: [bad\nstatus: todo\n---\n")
     assert next_task_id(tmp_path) == "task-010"
+
+
+# ---- per-task model override -------------------------------------------------
+
+def test_task_model_override_parsed_and_stripped(tmp_path):
+    t = tasks.load_task(write(tmp_path, "task-001.md",
+                              "---\nid: task-001\nstatus: todo\nmodel: ' claude-sonnet-5-5 '\n---\n"))
+    assert t.model == "claude-sonnet-5-5"
+
+
+@pytest.mark.parametrize("extra", ["", "model:\n", "model: null\n"])
+def test_task_without_model_has_none(tmp_path, extra):
+    t = tasks.load_task(write(tmp_path, "task-001.md",
+                              f"---\nid: task-001\nstatus: todo\n{extra}---\n"))
+    assert t.status == "todo"
+    assert t.model is None
+
+
+@pytest.mark.parametrize("value", ["''", "'  '", "42", "[a, b]"])
+def test_task_with_bad_model_is_invalid(tmp_path, value):
+    """A typo'd model would otherwise fail only when `claude` starts, as a BLOCKED task."""
+    t = tasks.load_task(write(tmp_path, "task-001.md",
+                              f"---\nid: task-001\nstatus: todo\nmodel: {value}\n---\n"))
+    assert t.status == "invalid"
+    assert "model" in t.error
