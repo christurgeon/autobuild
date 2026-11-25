@@ -168,11 +168,14 @@ Module responsibilities:
   undoes a merge that fails the post-merge checks with `git reset --merge` (fallback: reset the
   merge-footprint paths to HEAD, then `reset --merge` again; raises `MergeUndoFailed` to halt if
   that fails). It never uses `reset --hard`, which would revert uncommitted `tasks/` status.
-  A re-reap after a crash between the merge and `reaped.json` finds the earlier merge
-  (`_landed_merge`: a first-parent merge on base whose merged parent is the branch tip), does
-  not merge again, and re-runs the post-merge checks. On failure it undoes to that merge's first
-  parent if base is still on it; if later commits sit on top it raises `MergeUndoFailed` and
-  never resets over them.
+  A re-reap after a crash during the post-merge checks (after the merge, before the reaper's
+  `remove_worktree`/`delete_branch`; a crash after those is not covered) finds the earlier merge
+  (`_landed_merge`: a first-parent merge on base whose merged parent is the branch tip; full
+  history if the `base_sha` range fails), does not merge again, and re-runs the post-merge
+  checks. On failure it undoes to that merge's first parent if base is still on it. If later
+  commits sit on top, or a merge moved nothing ("Already up to date"), it never resets: it raises
+  `MergeUndoFailed`, or during a shutdown returns failure and leaves the merge on base for the
+  next run.
 - **`autobuild/reaper.py`** — `reap_session` / `_reap_session_locked` (under a per-session
   `_session_reap_lock`), `_handle_timeout`, `_requeue_fresh` (re-queue a killed session's task
   WITHOUT a `retries.json` entry — used for `INTERRUPTED`), `file_followups`, `reap_all` (takes

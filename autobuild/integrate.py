@@ -201,8 +201,12 @@ def integrate(tid: str, config: Config, paths: Paths, sdir: Path, *, sleep=time.
             tip = _git(root, "rev-parse", f"refs/heads/{base}").stdout.strip()
             warn(f"{branch} was already merged into {base} at {landed[:12]} by an "
                  f"interrupted reap; re-running the post-merge checks")
-            pre = _git(root, "rev-parse", f"{landed}^1").stdout.strip() if tip == landed else None
-            return _post_merge_verify(tid, branch, config, paths, sdir, pre, merge_sha=landed)
+            if tip == landed:
+                pre = _git(root, "rev-parse", f"{landed}^1").stdout.strip()
+                return _post_merge_verify(tid, branch, config, paths, sdir, pre)
+            return _post_merge_verify(
+                tid, branch, config, paths, sdir, None,
+                no_undo=f"its merge {landed} on {base} already has later commits on top")
         # Snapshot base BEFORE the merge so a failed post-merge verification can undo it
         # precisely (simpler and more local than re-reading meta.json's base_sha).
         pre_merge_sha = _git(root, "rev-parse", f"refs/heads/{base}").stdout.strip()
@@ -210,6 +214,14 @@ def integrate(tid: str, config: Config, paths: Paths, sdir: Path, *, sleep=time.
         if r.returncode != 0:
             _git(root, "merge", "--abort")  # don't leave the repo mid-merge
             return False, f"auto-merge conflict for {branch}"
+        if _git(root, "rev-parse", f"refs/heads/{base}").stdout.strip() == pre_merge_sha:
+            # "Already up to date": base already contains the branch, but _landed_merge
+            # could not find the merge. A reset to pre_merge_sha would undo nothing.
+            warn(f"{branch} is already contained in {base}; no merge commit made")
+            return _post_merge_verify(
+                tid, branch, config, paths, sdir, None,
+                no_undo=f"{base} already contained it, so autobuild cannot tell which commit "
+                        f"to undo")
         return _post_merge_verify(tid, branch, config, paths, sdir, pre_merge_sha)
 
     return False, f"unknown integration mode '{mode}'"
@@ -218,13 +230,18 @@ def integrate(tid: str, config: Config, paths: Paths, sdir: Path, *, sleep=time.
 def _landed_merge(root: Path, base: str, branch: str, sdir: Path) -> str | None:
     """The merge commit on base's first-parent chain whose merged parent is `branch`'s tip,
     or None. Set only when an earlier reap of this session merged and then died (SIGKILL,
-    crash) before writing reaped.json. Searched from meta.json's base_sha when present."""
+    crash) before writing reaped.json. Searched from meta.json's base_sha when present, and
+    over base's whole first-parent history when that range can't be resolved (base_sha
+    missing, or gone after base was rewritten)."""
     tip = _git(root, "rev-parse", "--verify", "-q", f"refs/heads/{branch}").stdout.strip()
     if not tip:
         return None
     base_sha = str((_read_json(sdir / "meta.json") or {}).get("base_sha", ""))
     rng = f"{base_sha}..refs/heads/{base}" if base_sha else f"refs/heads/{base}"
     r = _git(root, "rev-list", "--first-parent", "--merges", "--parents", rng)
+    if r.returncode != 0 and base_sha:
+        r = _git(root, "rev-list", "--first-parent", "--merges", "--parents",
+                 f"refs/heads/{base}")
     if r.returncode != 0:
         return None
     for line in r.stdout.splitlines():
@@ -235,7 +252,7 @@ def _landed_merge(root: Path, base: str, branch: str, sdir: Path) -> str | None:
 
 
 def _post_merge_verify(tid: str, branch: str, config: Config, paths: Paths, sdir: Path,
-                       pre_merge_sha: str | None, *, merge_sha: str = "") -> tuple[bool, str]:
+                       pre_merge_sha: str | None, *, no_undo: str = "") -> tuple[bool, str]:
     """After an auto-merge lands, re-run config.checks against the COMBINED base working
     tree (paths.root). Two independently-green branches can still merge into a red base with
     no textual conflict (semantic skew: A renames a helper, B adds a caller of the old name);
@@ -245,9 +262,11 @@ def _post_merge_verify(tid: str, branch: str, config: Config, paths: Paths, sdir
     and report failure — the reaper then blocks the task and keeps the branch. Skipped (merge stands) when verify_after_merge is off or
     there are no checks; independent of verify_checks (which gates the pre-merge worktree run).
 
-    `pre_merge_sha` is None on a re-reap whose merge (`merge_sha`) already has later commits
-    on top. A reset would discard that later work, so a failing check raises MergeUndoFailed
-    instead (or, during a shutdown, returns failure so the reaper abandons the reap)."""
+    `pre_merge_sha` is None when no safe undo exists (`no_undo` says why): a re-reap whose
+    merge already has later commits on top (a reset would discard that work), or a merge that
+    moved nothing. A failing check then raises MergeUndoFailed. During a shutdown it instead
+    returns failure WITHOUT touching base, so the reaper abandons the reap and the next run
+    re-checks; base keeps the failing merge until then."""
     base = config.base_branch
     landed = f"merged {branch} into {base}"
     if not config.verify_after_merge or not config.checks:
@@ -260,12 +279,16 @@ def _post_merge_verify(tid: str, branch: str, config: Config, paths: Paths, sdir
                               name="post-merge-checks.log")
             if pre_merge_sha is None:
                 if interrupt.requested():
-                    return False, f"post-merge checks interrupted for {branch}"
+                    warn(f"post-merge checks failed for {branch} during shutdown; {base} keeps "
+                         f"the merge until the next run re-checks it")
+                    return False, f"post-merge checks failed for {branch}; merge not undone"
                 raise MergeUndoFailed(
-                    f"post-merge checks failed for {branch}, but its merge {merge_sha} on "
-                    f"{base} already has later commits on top; autobuild will not reset over "
-                    f"them. Fix {base} by hand (see {sdir / 'post-merge-checks.log'}), then "
-                    f"set {tid}'s status and delete {sdir} so it is not reaped again")
+                    f"post-merge checks failed for {branch}, but {no_undo}; autobuild will not "
+                    f"reset {base}. See {sdir / 'post-merge-checks.log'}. Fix {base} on a branch "
+                    f"(e.g. `git revert -m 1 <merge>` there) and merge it with `--no-ff`: a "
+                    f"plain commit on {base} trips the base-leak guard for other sessions. Then "
+                    f"set {tid}'s status, remove its worktree, branch {branch} and {sdir} so "
+                    f"it is not reaped again")
             _undo_merge(paths, pre_merge_sha)
             return False, f"post-merge checks failed for {branch}; merge reverted"
     return True, landed

@@ -326,7 +326,8 @@ def _abandon_for_shutdown(sid: str, tid: str, why: str) -> bool:
     """A COMPLETE reap that failed while a shutdown is in progress: the failure is likely
     the terminal SIGINT hitting the check or git child, not the work. Change nothing and
     write no reaped.json, so the next run re-verifies and re-integrates from the intact
-    result.json (integrate's failure paths already restored base)."""
+    result.json. integrate's failure paths have restored base, except a re-reap whose merge
+    cannot be safely undone: that red merge stays on base until the next run re-checks it."""
     warn(f"{sid}: {tid} {why} during shutdown — left for the next run")
     return False
 

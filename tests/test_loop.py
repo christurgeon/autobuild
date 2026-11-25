@@ -7,6 +7,7 @@ import time
 import pytest
 
 from autobuild import integrate as integrate_mod
+from autobuild import interrupt as interrupt_mod
 from autobuild import loop as loop_mod
 from autobuild import procs as procs_mod
 from autobuild import reaper as reaper_mod
@@ -897,6 +898,74 @@ def test_rereap_after_crash_never_resets_over_later_merges(git_repo, git):
     assert (git_repo / "other.txt").exists()
     assert not (sdir / "reaped.json").exists()
     assert not (sdir / "leak.json").exists()  # harness merges never trip the leak guard
+
+
+def _stack_later_merge(git, repo):
+    git(repo, "checkout", "-q", "-b", "autobuild/task-002")
+    (repo / "other.txt").write_text("o")
+    git(repo, "add", "other.txt")
+    git(repo, "commit", "-q", "-m", "other work")
+    git(repo, "checkout", "-q", "main")
+    git(repo, "merge", "--no-ff", "-q", "-m", "autobuild: merge task-002", "autobuild/task-002")
+    return _sha(git, repo, "main")
+
+
+def test_rereap_shutdown_leaves_unundoable_merge_and_abandons(git_repo, git, monkeypatch):
+    paths = setup(git_repo)
+    _commit_tasks(paths, git, "task-001")
+    sdir = _skew_setup(paths, git)
+    _crashed_merge(paths, git, sdir)
+    tip = _stack_later_merge(git, git_repo)
+    monkeypatch.setattr(interrupt_mod, "requested", lambda: True)
+    cfg = Config(integration="auto-merge", checks=[_SKEW_CHECK])
+
+    assert reap_session(sdir, cfg, paths) is False  # abandoned, not halted
+    assert _sha(git, git_repo, "main") == tip
+    assert not (sdir / "reaped.json").exists()
+    assert read_task(paths.tasks_dir / "task-001.md").status == "in-progress"
+
+
+def test_rereap_finds_landed_merge_when_base_sha_unresolvable(git_repo, git):
+    paths = setup(git_repo)
+    _commit_tasks(paths, git, "task-001")
+    sdir = _skew_setup(paths, git)
+    pre, _ = _crashed_merge(paths, git, sdir)
+    meta = json.loads((sdir / "meta.json").read_text())
+    meta["base_sha"] = "0" * 40  # e.g. base was rewritten after spawn
+    (sdir / "meta.json").write_text(json.dumps(meta))
+    cfg = Config(integration="auto-merge", checks=[_SKEW_CHECK])
+
+    assert reap_session(sdir, cfg, paths) is True
+    assert _sha(git, git_repo, "main") == pre  # the real merge is undone
+    assert _merge_count(git, git_repo) == 0
+
+
+def test_landed_merge_scans_full_history_without_base_sha(git_repo, git):
+    paths = setup(git_repo)
+    _commit_tasks(paths, git, "task-001")
+    sdir = _skew_setup(paths, git)  # make_session writes no base_sha
+    git(git_repo, "merge", "--no-ff", "-q", "-m", "autobuild: merge task-001",
+        "autobuild/task-001")
+    merged = _sha(git, git_repo, "main")
+    _stack_later_merge(git, git_repo)
+
+    assert integrate_mod._landed_merge(git_repo, "main", "autobuild/task-001", sdir) == merged
+    assert integrate_mod._landed_merge(git_repo, "main", "autobuild/task-002", sdir) != merged
+
+
+def test_noop_merge_never_reports_merge_reverted(git_repo, git, monkeypatch):
+    paths = setup(git_repo)
+    _commit_tasks(paths, git, "task-001")
+    sdir = _skew_setup(paths, git)
+    _, merged = _crashed_merge(paths, git, sdir)
+    # the landed merge goes undetected, so `git merge` runs and is "Already up to date"
+    monkeypatch.setattr(integrate_mod, "_landed_merge", lambda *a: None)
+    cfg = Config(integration="auto-merge", checks=[_SKEW_CHECK])
+
+    with pytest.raises(loop_mod.MergeUndoFailed, match="already contained"):
+        reap_session(sdir, cfg, paths)
+    assert _sha(git, git_repo, "main") == merged
+    assert not (sdir / "reaped.json").exists()
 
 
 # ---- auto-merge requires base_branch checked out ----------------------------
