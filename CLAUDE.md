@@ -168,6 +168,11 @@ Module responsibilities:
   undoes a merge that fails the post-merge checks with `git reset --merge` (fallback: reset the
   merge-footprint paths to HEAD, then `reset --merge` again; raises `MergeUndoFailed` to halt if
   that fails). It never uses `reset --hard`, which would revert uncommitted `tasks/` status.
+  A re-reap after a crash between the merge and `reaped.json` finds the earlier merge
+  (`_landed_merge`: a first-parent merge on base whose merged parent is the branch tip), does
+  not merge again, and re-runs the post-merge checks. On failure it undoes to that merge's first
+  parent if base is still on it; if later commits sit on top it raises `MergeUndoFailed` and
+  never resets over them.
 - **`autobuild/reaper.py`** — `reap_session` / `_reap_session_locked` (under a per-session
   `_session_reap_lock`), `_handle_timeout`, `_requeue_fresh` (re-queue a killed session's task
   WITHOUT a `retries.json` entry — used for `INTERRUPTED`), `file_followups`, `reap_all` (takes
@@ -282,7 +287,8 @@ This is the part that requires reading multiple files to understand:
    gate (`_post_merge_verify`, opt-out `verify_after_merge`) re-runs the
    checks against the **combined base tree** after the `--no-ff` merge and **undoes the merge with
    `git reset --merge`** if they fail (fallback: reset the merge-footprint paths to HEAD, then
-   `reset --merge` again; halts with `MergeUndoFailed` if that fails) — catching semantic merge skew two independently-green
+   `reset --merge` again; halts with `MergeUndoFailed` if that fails; a re-reap after a crash
+   mid-checks reuses the merge already on base, see `integrate.py`) — catching semantic merge skew two independently-green
    branches can produce with no textual conflict. If they
    pass it **integrates** (`integrate` → `pr` via `gh` / `auto-merge` / `branch`) and only then
    `set_status`es the task `done` — so a failed auto-merge leaves the task `blocked`, not falsely
