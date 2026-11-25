@@ -107,7 +107,8 @@ timeout_max_retries: 2        # integer >= 0: auto-retries for a timed-out task 
 #                rate_limited / interrupted by Ctrl-C or SIGTERM); message has the
 #                reason + counts
 #   halt         the run HALTED (auto-merge): a session escaped onto base_branch, base_branch
-#                is not checked out, or a failed merge could not be undone
+#                is not checked out, a failed merge could not be undone, or base already
+#                contained a branch and fails the post-merge checks
 #   needs_human  a session reported NEEDS_HUMAN (names the task)
 #   rate_limited a session hit a usage/rate limit (once per run); the run stops claiming
 #                new work, re-queues the task, and ends with reason rate_limited

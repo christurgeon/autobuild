@@ -46,6 +46,7 @@ from .costs import _cost_pending, _run_spend, _settle_session_costs  # noqa: F40
 from .guards import (  # noqa: F401
     BaseBranchLeak,
     BaseBranchNotCheckedOut,
+    BaseFailsChecks,
     DirtyBaseTree,
     MergeUndoFailed,
     NestedRunRefused,
