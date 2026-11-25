@@ -28,13 +28,6 @@ class MergeUndoFailed(RunHalted):
     the merge commit. Raised before the task is marked or reaped.json is written."""
 
 
-class BaseFailsChecks(RunHalted):
-    """An auto-merge was a no-op (base already contained the branch) and base fails the
-    post-merge checks. Nothing was merged, so nothing is undone; continuing would fail every
-    later merge on top of a red base. Raised before the task is marked or reaped.json is
-    written, so the session re-reaps once base is fixed."""
-
-
 class BaseBranchLeak(RunHalted):
     """A session advanced base_branch with commit(s) the harness did not create — an
     agent that escaped its worktree and committed onto the live base. Raised by the

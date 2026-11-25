@@ -162,7 +162,7 @@ Module responsibilities:
   the reaper raises `BaseBranchLeak` to halt the whole run; in `pr`/`branch` (base is never
   integrated onto) it blocks just that task and continues. Either way it writes a `leak.json`
   marker. Every run-halting condition subclasses `RunHalted`: `BaseBranchLeak`,
-  `BaseBranchNotCheckedOut`, `MergeUndoFailed`, and `BaseFailsChecks`.
+  `BaseBranchNotCheckedOut`, and `MergeUndoFailed`.
 - **`autobuild/verify.py`** — `verify_checks` (re-run `config.checks` in the session worktree
   before integrating) and `_write_checks_log`.
 - **`autobuild/integrate.py`** — `integrate` (`pr` / `auto-merge` / `branch`), the bounded
@@ -171,9 +171,7 @@ Module responsibilities:
   raises `BaseBranchNotCheckedOut` if the main checkout is not on `base_branch`. `_undo_merge`
   undoes a merge that fails the post-merge checks with `git reset --merge` (fallback: reset the
   merge-footprint paths to HEAD, then `reset --merge` again; raises `MergeUndoFailed` to halt if
-  that fails). If the merge was a no-op (base already contained the branch) and the checks
-  fail, `integrate` raises `BaseFailsChecks` to halt (base itself is red; nothing was merged, so nothing
-  is reverted). It never uses `reset --hard`, which would revert uncommitted `tasks/` status.
+  that fails). It never uses `reset --hard`, which would revert uncommitted `tasks/` status.
 - **`autobuild/reaper.py`** — `reap_session` / `_reap_session_locked` (under a per-session
   `_session_reap_lock`), `_handle_timeout`, `_requeue_fresh` (re-queue a killed session's task
   WITHOUT a `retries.json` entry — used for `INTERRUPTED`), `file_followups`, `reap_all` (takes
@@ -290,10 +288,12 @@ This is the part that requires reading multiple files to understand:
    `git reset --merge`** if they fail (fallback: reset the merge-footprint paths to HEAD, then
    `reset --merge` again; halts with `MergeUndoFailed` if that fails) — catching semantic merge skew two independently-green
    branches can produce with no textual conflict. If the merge was a no-op (base already
-   contained the branch, e.g. a run killed between the merge and `reaped.json`, or an empty
-   branch on a red base) and the checks fail, base is not reverted because nothing was merged:
-   the run halts with `BaseFailsChecks` and the session stays unreaped, so it integrates once
-   the operator fixes base. A crash between merge and `reaped.json` is not otherwise recovered. If the
+   contained the branch) and the checks fail, the undo runs only when base's top commit is this
+   branch's own merge (`HEAD^2` == branch tip: a run killed between the merge and `reaped.json`);
+   otherwise (an empty branch, or the merge buried under later commits) nothing is reverted, the
+   task is blocked, and a warning names base's sha. A crash between merge and `reaped.json` is not
+   otherwise recovered. Known limitation: if base itself fails the checks, every merge in the run
+   is undone and its task blocked; a red base is not detected as such. If the
    checks pass it **integrates** (`integrate` → `pr` via `gh` / `auto-merge` / `branch`) and only then
    `set_status`es the task `done` — so a failed auto-merge leaves the task `blocked`, not falsely
    `done`. `BLOCKED`/`NEEDS_HUMAN` set the task `blocked`; a synthetic `TIMEOUT` is never integrated
