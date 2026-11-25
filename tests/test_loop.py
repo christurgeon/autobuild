@@ -826,6 +826,44 @@ def test_post_merge_undo_failure_halts(git_repo, git, monkeypatch):
     assert read_task(paths.tasks_dir / "task-001.md").status == "in-progress"
 
 
+def test_noop_merge_failing_checks_does_not_claim_revert(git_repo, git, capsys):
+    """A prior reap merged, then died before reaped.json: the re-reap's merge is a no-op,
+    so there is nothing to revert. Block honestly and warn; never claim a revert or halt."""
+    paths = setup(git_repo)
+    _commit_tasks(paths, git, "task-001")
+    sdir = _skew_setup(paths, git)
+    git(git_repo, "merge", "--no-ff", "-q", "-m", "autobuild: merge task-001",
+        "autobuild/task-001")  # the earlier, unrecorded merge
+    merged = git(git_repo, "rev-parse", "HEAD").stdout.strip()
+    cfg = Config(integration="auto-merge", checks=[_SKEW_CHECK])
+
+    assert reap_session(sdir, cfg, paths) is True
+    assert git(git_repo, "rev-parse", "HEAD").stdout.strip() == merged
+    assert "merge task-001" in git(git_repo, "log", "--oneline", "main").stdout
+    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+    assert _branch_exists(git, git_repo, "task-001")
+    assert json.loads((sdir / "reaped.json").read_text())["integrated"] is False
+    out = capsys.readouterr()
+    log = out.out + out.err
+    assert "merge reverted" not in log
+    assert "already contained autobuild/task-001" in log
+    assert merged[:12] in log
+
+
+def test_noop_merge_empty_branch_passing_checks_integrates(git_repo, git):
+    paths = setup(git_repo)
+    _commit_tasks(paths, git, "task-001")
+    make_worktree(paths, "sess-task-001", "task-001", "main")  # branch has no commits
+    sdir = make_session(paths, "task-001", "COMPLETE", commit="x")
+    head = git(git_repo, "rev-parse", "HEAD").stdout.strip()
+    cfg = Config(integration="auto-merge", checks=["true"])
+
+    assert reap_session(sdir, cfg, paths) is True
+    assert git(git_repo, "rev-parse", "HEAD").stdout.strip() == head
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"
+    assert json.loads((sdir / "reaped.json").read_text())["integrated"] is True
+
+
 # ---- auto-merge requires base_branch checked out ----------------------------
 
 def _sha(git, repo, ref):

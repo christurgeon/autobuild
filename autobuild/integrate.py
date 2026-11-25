@@ -225,6 +225,16 @@ def _post_merge_verify(tid: str, branch: str, config: Config, paths: Paths, sdir
         if r.returncode != 0:
             _write_checks_log(sdir, cmd, r.returncode, r.stdout, r.stderr,
                               name="post-merge-checks.log")
+            head = _git(paths.root, "rev-parse", "HEAD").stdout.strip()
+            if head == pre_merge_sha:
+                # The merge was a no-op: base already held this branch (e.g. a run killed
+                # between merge and reaped.json), so there is nothing to undo.
+                warn(f"post-merge checks failed, but {base} already contained {branch} "
+                     f"before this merge; {base} ({head[:12]}) may hold a merge that never "
+                     f"passed post-merge checks (e.g. from a run killed before it finished "
+                     f"reaping) — inspect `git log --first-parent {base}`")
+                return False, (f"post-merge checks failed for {branch}; {base} already "
+                               f"contained it (nothing reverted)")
             _undo_merge(paths, pre_merge_sha)
             return False, f"post-merge checks failed for {branch}; merge reverted"
     return True, landed

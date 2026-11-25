@@ -287,8 +287,11 @@ This is the part that requires reading multiple files to understand:
    checks against the **combined base tree** after the `--no-ff` merge and **undoes the merge with
    `git reset --merge`** if they fail (fallback: reset the merge-footprint paths to HEAD, then
    `reset --merge` again; halts with `MergeUndoFailed` if that fails) — catching semantic merge skew two independently-green
-   branches can produce with no textual conflict. If they
-   pass it **integrates** (`integrate` → `pr` via `gh` / `auto-merge` / `branch`) and only then
+   branches can produce with no textual conflict. If the merge was a no-op (base already
+   contained the branch, e.g. a run killed between the merge and `reaped.json`) and the checks
+   fail, nothing is undone: the task is blocked with a loud warning naming base's HEAD — a crash
+   between merge and `reaped.json` is not otherwise recovered. If the
+   checks pass it **integrates** (`integrate` → `pr` via `gh` / `auto-merge` / `branch`) and only then
    `set_status`es the task `done` — so a failed auto-merge leaves the task `blocked`, not falsely
    `done`. `BLOCKED`/`NEEDS_HUMAN` set the task `blocked`; a synthetic `TIMEOUT` is never integrated
    or verified (its tree is incomplete) and files no follow-ups — instead, under the backlog lock,
