@@ -11,6 +11,12 @@ from . import preflight as preflight_mod
 from .config import ConfigError, load_config
 from .loop import log, ok
 from .paths import Paths
+from .tasks import iter_tasks
+
+# `run` finished but left a task `blocked` or `timeout`, so `autobuild run && deploy` stops.
+# Distinct from 1 (refused: run lock held, nested run) and 2 (config/preflight/dirty base/halt).
+EXIT_UNFINISHED = 3
+_FAILED = ("blocked", "timeout")
 
 
 def _err(msg: str) -> None:
@@ -171,6 +177,11 @@ def main(argv: list[str] | None = None) -> int:
         except loop_mod.RunInterrupted as e:
             _err(f"{e}; sessions stopped and their tasks re-queued")
             return 128 + e.signum
+        failed = [t for t in iter_tasks(paths.tasks_dir) if t.status in _FAILED]
+        if failed:
+            _err("run ended with failed tasks: "
+                 + ", ".join(f"{t.id} ({t.status})" for t in failed))
+            return EXIT_UNFINISHED
     elif args.command == "status":
         loop_mod.status(paths, config)
     elif args.command == "reap":

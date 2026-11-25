@@ -77,7 +77,10 @@ or `yq`. The three I/O layers everything else builds on:
 
 Module responsibilities:
 
-- **`autobuild/cli.py`** — `argparse` dispatch + the `autobuild` entry point. `ab_init` copies
+- **`autobuild/cli.py`** — `argparse` dispatch + the `autobuild` entry point. After `run` returns
+  normally, `main` exits `EXIT_UNFINISHED` (3) if any task in `tasks/` is `blocked` or `timeout`
+  (whatever the end reason), else 0; 1 = refused (run lock / nested), 2 = config / preflight /
+  dirty base / halt, `128 + signum` = interrupted. `ab_init` copies
   the packaged templates into the project and installs the bundled skills under `.claude/skills/`
   (`_install_skills` / `_copy_resource_tree`, copy-if-absent so re-running init never clobbers a
   user's edits); `require_init` guards the other commands.

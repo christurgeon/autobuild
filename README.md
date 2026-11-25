@@ -73,10 +73,27 @@ clobber a skill you've edited.
 |---|---|
 | `autobuild init` | Copy `GOAL.md`, `tasks/`, and `.autobuild/config.yml` into the current project, and install the authoring skills under `.claude/skills/`. |
 | `autobuild doctor` | Preflight the environment (`claude` on PATH, git identity, base branch, disk, `gh` auth, task files, contract, `.gitignore` coverage): PASS/WARN/FAIL report, exits non-zero on any FAIL. `run` enforces the critical checks itself. |
-| `autobuild run` | Run the outer loop: schedule → spawn sessions in worktrees → reap. Repeats until done. |
+| `autobuild run` | Run the outer loop: schedule → spawn sessions in worktrees → reap. Repeats until done. Exit codes are listed below. |
 | `autobuild status` | Print every task's status and any in-flight sessions. |
 | `autobuild reap` | One-shot: collect finished sessions, update tasks, open PRs / merge per config. |
 | `autobuild clean` | Remove finished worktrees and stale session dirs. |
+
+### `run` exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | The run ended and no task is `blocked` or `timeout`. |
+| 1 | Refused: another `run` holds the run lock, or `run` was started inside a session. |
+| 2 | Invalid config, failed preflight, dirty base tree, or a halt (base-branch leak, base not checked out, failed merge undo). |
+| 3 | The run ended with at least one task `blocked` or `timeout`. |
+| 130 / 143 | Stopped by SIGINT / SIGTERM (see below). |
+
+Code 3 checks every task in `tasks/` at run end, for every end reason (`drained`, `settled`,
+`max_iterations`, a budget cap, `rate_limited`). A task blocked by an earlier run also counts.
+Without a blocked or timed-out task, those reasons exit 0, even if `todo` work remains (for
+example after a budget cap or a rate limit). Use `autobuild status` or
+`.autobuild/run-summary.json` to see what remains. So `autobuild run && deploy` deploys only
+when nothing failed.
 
 ### Stopping a run
 

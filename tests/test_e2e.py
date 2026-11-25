@@ -197,6 +197,41 @@ def test_e2e_drain_with_blocked_task_is_not_reported_complete(git_repo, stub_bin
     assert "run ended: drained" in out  # the run-end reason is unchanged
 
 
+def test_e2e_cli_run_exits_3_when_a_task_is_blocked(git_repo, stub_bin, monkeypatch, capsys):
+    """`autobuild run && deploy` must not deploy after a failure: a run that ends with any
+    task `blocked` exits EXIT_UNFINISHED (3), not 0."""
+    stub_bin(STUB_STATUS_task_002="BLOCKED")
+    paths = init_project(git_repo, monkeypatch, integration="branch")
+    write_task(paths, "task-001")
+    write_task(paths, "task-002")
+
+    assert cli.main(["run"]) == cli.EXIT_UNFINISHED == 3
+    assert statuses(paths) == {"task-001": "done", "task-002": "blocked"}
+    assert "task-002" in capsys.readouterr().err
+
+
+def test_e2e_cli_run_exits_3_when_a_task_times_out(git_repo, stub_bin, monkeypatch):
+    stub_bin()
+    paths = init_project(git_repo, monkeypatch, integration="branch")
+    write_task(paths, "task-001")
+    (paths.tasks_dir / "task-001.md").write_text(
+        (paths.tasks_dir / "task-001.md").read_text().replace("status: todo", "status: timeout"))
+    write_task(paths, "task-002")
+
+    assert cli.main(["run"]) == 3
+    assert statuses(paths) == {"task-001": "timeout", "task-002": "done"}
+
+
+def test_e2e_cli_run_exits_0_on_clean_drain(git_repo, stub_bin, monkeypatch):
+    stub_bin()
+    paths = init_project(git_repo, monkeypatch, integration="branch")
+    write_task(paths, "task-001")
+    write_task(paths, "task-002", depends_on=["task-001"])
+
+    assert cli.main(["run"]) == 0
+    assert statuses(paths) == {"task-001": "done", "task-002": "done"}
+
+
 def test_e2e_malformed_task_file_settles_not_crashes(git_repo, stub_bin, monkeypatch, capsys):
     stub_bin()
     paths = init_project(git_repo, monkeypatch, integration="branch")
