@@ -254,6 +254,27 @@ def test_e2e_cli_run_exits_0_on_clean_drain(git_repo, stub_bin, monkeypatch):
     assert statuses(paths) == {"task-001": "done", "task-002": "done"}
 
 
+def test_e2e_cli_run_signal_after_supervise_exits_128_plus_signum(git_repo, stub_bin,
+                                                                    monkeypatch):
+    """A SIGTERM that lands after the loop ended (e.g. during the status print) is still
+    honored: exit 143, not 0/3."""
+    import signal
+
+    from autobuild import interrupt, supervisor
+    stub_bin()
+    paths = init_project(git_repo, monkeypatch, integration="branch")
+    write_task(paths, "task-001")
+    real_status = supervisor.status
+
+    def status_then_signal(*a, **kw):
+        real_status(*a, **kw)
+        interrupt._on_signal(signal.SIGTERM, None)
+    monkeypatch.setattr(supervisor, "status", status_then_signal)
+
+    assert cli.main(["run"]) == 128 + signal.SIGTERM
+    assert statuses(paths) == {"task-001": "done"}
+
+
 def test_e2e_malformed_task_file_settles_not_crashes(git_repo, stub_bin, monkeypatch, capsys):
     stub_bin()
     paths = init_project(git_repo, monkeypatch, integration="branch")

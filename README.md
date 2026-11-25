@@ -83,7 +83,7 @@ clobber a skill you've edited.
 | Code | Meaning |
 |---|---|
 | 0 | The run ended and every task in `tasks/` is `done` (the backlog is complete). |
-| 1 | Refused: another `run` holds the run lock, or `run` was started inside a session. |
+| 1 | Refused: the project is not initialized (run `autobuild init`), another `run` holds the run lock, or `run` was started inside a session. |
 | 2 | Invalid config, failed preflight, dirty base tree, or a halt (base-branch leak, base not checked out, failed merge undo). |
 | 3 | The run ended and at least one task is not `done`. |
 | 130 / 143 | Stopped by SIGINT / SIGTERM (see below). |

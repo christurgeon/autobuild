@@ -217,6 +217,8 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float,
         raise
     _finish_run(paths, config, reason, run_sids)
     status(paths, config)
+    if interrupt.requested():  # a signal after _supervise returned must still exit 128+signum
+        raise interrupt.RunInterrupted(interrupt.signum() or signal.SIGINT)
     return [t for t in iter_tasks(paths.tasks_dir) if t.status != "done"]
 
 
