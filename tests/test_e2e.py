@@ -197,6 +197,84 @@ def test_e2e_drain_with_blocked_task_is_not_reported_complete(git_repo, stub_bin
     assert "run ended: drained" in out  # the run-end reason is unchanged
 
 
+def test_e2e_cli_run_exits_3_when_a_task_is_blocked(git_repo, stub_bin, monkeypatch, capsys):
+    """`autobuild run && deploy` must not deploy after a failure: a run that ends with any
+    task not `done` exits EXIT_UNFINISHED (3), not 0."""
+    stub_bin(STUB_STATUS_task_002="BLOCKED")
+    paths = init_project(git_repo, monkeypatch, integration="branch")
+    write_task(paths, "task-001")
+    write_task(paths, "task-002")
+
+    assert cli.main(["run"]) == cli.EXIT_UNFINISHED == 3
+    assert statuses(paths) == {"task-001": "done", "task-002": "blocked"}
+    assert "task-002 (blocked)" in capsys.readouterr().err
+
+
+def test_e2e_cli_run_exits_3_when_a_task_times_out(git_repo, stub_bin, monkeypatch):
+    stub_bin(STUB_SLEEP="30")  # outlives the 1s deadline -> killed -> synthetic TIMEOUT
+    paths = init_project(git_repo, monkeypatch, integration="branch")
+    _set_cfg(paths, "task_timeout_seconds: 3600", "task_timeout_seconds: 1")
+    _set_cfg(paths, "kill_grace_seconds: 20", "kill_grace_seconds: 1")
+    _set_cfg(paths, "timeout_max_retries: 2", "timeout_max_retries: 0")
+    write_task(paths, "task-001")
+
+    assert cli.main(["run"]) == 3
+    assert statuses(paths) == {"task-001": "timeout"}
+
+
+def test_e2e_cli_run_exits_3_with_invalid_task_file(git_repo, stub_bin, monkeypatch, capsys):
+    """A settled backlog stuck on an unparseable task file is not complete."""
+    stub_bin()
+    paths = init_project(git_repo, monkeypatch, integration="branch")
+    write_task(paths, "task-001")
+    (paths.tasks_dir / "task-002.md").write_text("---\nid: task-002\nstatus: [todo\n---\n")
+
+    assert cli.main(["run"]) == 3
+    assert "task-002 (invalid)" in capsys.readouterr().err
+
+
+def test_e2e_cli_run_exits_3_when_rate_limited_with_todo_left(git_repo, stub_bin, monkeypatch):
+    stub_bin(STUB_RATE_LIMIT_task_001="event")
+    paths = init_project(git_repo, monkeypatch, integration="branch", max_parallel=1)
+    write_task(paths, "task-001")
+    write_task(paths, "task-002")
+
+    assert cli.main(["run"]) == 3
+    assert set(statuses(paths).values()) == {"todo"}  # nothing blocked, but work remains
+    assert json.loads(paths.run_summary.read_text())["reason"] == "rate_limited"
+
+
+def test_e2e_cli_run_exits_0_on_clean_drain(git_repo, stub_bin, monkeypatch):
+    stub_bin()
+    paths = init_project(git_repo, monkeypatch, integration="branch")
+    write_task(paths, "task-001")
+    write_task(paths, "task-002", depends_on=["task-001"])
+
+    assert cli.main(["run"]) == 0
+    assert statuses(paths) == {"task-001": "done", "task-002": "done"}
+
+
+def test_e2e_cli_run_signal_after_supervise_exits_128_plus_signum(git_repo, stub_bin,
+                                                                    monkeypatch):
+    """A SIGTERM that lands after the loop ended (e.g. during the status print) is still
+    honored: exit 143, not 0/3."""
+    import signal
+
+    from autobuild import interrupt, supervisor
+    stub_bin()
+    paths = init_project(git_repo, monkeypatch, integration="branch")
+    write_task(paths, "task-001")
+    real_status = supervisor.status
+
+    def status_then_signal(*a, **kw):
+        real_status(*a, **kw)
+        interrupt._on_signal(signal.SIGTERM, None)
+    monkeypatch.setattr(supervisor, "status", status_then_signal)
+
+    assert cli.main(["run"]) == 128 + signal.SIGTERM
+    assert statuses(paths) == {"task-001": "done"}
+
+
 def test_e2e_malformed_task_file_settles_not_crashes(git_repo, stub_bin, monkeypatch, capsys):
     stub_bin()
     paths = init_project(git_repo, monkeypatch, integration="branch")

@@ -73,10 +73,29 @@ clobber a skill you've edited.
 |---|---|
 | `autobuild init` | Copy `GOAL.md`, `tasks/`, and `.autobuild/config.yml` into the current project, and install the authoring skills under `.claude/skills/`. |
 | `autobuild doctor` | Preflight the environment (`claude` on PATH, git identity, base branch, disk, `gh` auth, task files, contract, `.gitignore` coverage): PASS/WARN/FAIL report, exits non-zero on any FAIL. `run` enforces the critical checks itself. |
-| `autobuild run` | Run the outer loop: schedule → spawn sessions in worktrees → reap. Repeats until done. |
+| `autobuild run` | Run the outer loop: schedule → spawn sessions in worktrees → reap. Repeats until done. Exit codes are listed below. |
 | `autobuild status` | Print every task's status and any in-flight sessions. |
 | `autobuild reap` | One-shot: collect finished sessions, update tasks, open PRs / merge per config. |
 | `autobuild clean` | Remove finished worktrees and stale session dirs. |
+
+### `run` exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | The run ended and every task in `tasks/` is `done` (the backlog is complete). |
+| 1 | Refused: the project is not initialized (run `autobuild init`), another `run` holds the run lock, or `run` was started inside a session. |
+| 2 | Invalid config, failed preflight, dirty base tree, or a halt (base-branch leak, base not checked out, failed merge undo). |
+| 3 | The run ended and at least one task is not `done`. |
+| 130 / 143 | Stopped by SIGINT / SIGTERM (see below). |
+
+Exit 0 means the backlog is complete. Any task that is not `done` at run end gives exit 3:
+`blocked`, `timeout`, an `invalid` task file, a task stuck on a missing, cyclic or duplicated
+dependency, a `review` task, or `todo` work left by `rate_limited`, a budget cap, or
+`max_iterations`. A task blocked by an earlier run also gives exit 3, because the backlog is
+not complete. A halted run keeps exit 2 and an interrupted run keeps 130 / 143. stderr names
+the first 10 tasks that are not `done`; `autobuild status` shows all of them. So
+`autobuild run && deploy` deploys only a complete backlog. `autobuild reap` still exits 0
+unless it halts (exit 2).
 
 ### Stopping a run
 

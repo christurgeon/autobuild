@@ -25,7 +25,7 @@ from .reconcile import reconcile
 from .report import _finish_run, rate_limited_sessions, status
 from .scheduler import claim_tasks, runnable_tasks, stuck_tasks
 from .session import RunningSession, spawn_session, write_sentinel_if_absent
-from .tasks import index_tasks, is_terminal, iter_tasks, set_status
+from .tasks import Task, index_tasks, is_terminal, iter_tasks, set_status
 
 # --- outer loop --------------------------------------------------------------
 
@@ -160,7 +160,7 @@ def _wait_until_next_event(running: list[RunningSession], sleep_seconds: float) 
 
 
 def run(paths: Paths, config: Config, *, sleep_seconds: float = 2.0,
-        monotonic=time.monotonic) -> None:
+        monotonic=time.monotonic) -> list[Task]:
     """Drive the outer loop until the backlog drains. Holds the run lock for the
     whole lifetime: a second `run` is refused (RunLockHeld) and a `reap` running
     alongside this one cannot reconcile the sessions this run owns. Because we hold
@@ -168,13 +168,16 @@ def run(paths: Paths, config: Config, *, sleep_seconds: float = 2.0,
     (re-queue them as a synthetic TIMEOUT, or block them).
 
     `monotonic` is the wall-clock source for the optional run budget; injectable so
-    tests can jump past the deadline without sleeping (mirrors `sleep_seconds`)."""
+    tests can jump past the deadline without sleeping (mirrors `sleep_seconds`).
+
+    Returns the tasks not `done` at run end (empty = backlog complete), read while the
+    run lock is still held so no other run can change them first."""
     _assert_not_nested()  # refuse a run nested inside a spawned session, before any lock
     with run_lock(paths.run_lock), interrupt.install():
-        _run_locked(paths, config, sleep_seconds=sleep_seconds, monotonic=monotonic)
+        return _run_locked(paths, config, sleep_seconds=sleep_seconds, monotonic=monotonic)
 
 def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float,
-                monotonic=time.monotonic) -> None:
+                monotonic=time.monotonic) -> list[Task]:
     paths.ensure_runtime_dirs()
     _assert_base_clean(paths)
     # Critical preflight (claude on PATH, git identity) BEFORE claiming or spawning, so a
@@ -214,6 +217,9 @@ def _run_locked(paths: Paths, config: Config, *, sleep_seconds: float,
         raise
     _finish_run(paths, config, reason, run_sids)
     status(paths, config)
+    if interrupt.requested():  # a signal after _supervise returned must still exit 128+signum
+        raise interrupt.RunInterrupted(interrupt.signum() or signal.SIGINT)
+    return [t for t in iter_tasks(paths.tasks_dir) if t.status != "done"]
 
 
 def _mark_interrupted(running: list[RunningSession], summary: str) -> list[RunningSession]:

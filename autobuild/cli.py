@@ -12,6 +12,11 @@ from .config import ConfigError, load_config
 from .loop import log, ok
 from .paths import Paths
 
+# `run` ended with a task not `done` (backlog incomplete), so `autobuild run && deploy` stops.
+# Distinct from 1 (refused: run lock held, nested run) and 2 (config/preflight/dirty base/halt).
+EXIT_UNFINISHED = 3
+_SHOW_UNFINISHED = 10
+
 
 def _err(msg: str) -> None:
     print(f"\033[1;31m[fail]\033[0m {msg}", file=sys.stderr)
@@ -151,7 +156,7 @@ def main(argv: list[str] | None = None) -> int:
         return preflight_mod.doctor(paths, config)
     if args.command == "run":
         try:
-            loop_mod.run(paths, config)
+            unfinished = loop_mod.run(paths, config)
         except loop_mod.RunLockHeld as e:
             _err(f"another 'autobuild run' is active (holds {e}); refusing to start a "
                  f"second run. The lock releases automatically when that run exits.")
@@ -171,6 +176,11 @@ def main(argv: list[str] | None = None) -> int:
         except loop_mod.RunInterrupted as e:
             _err(f"{e}; sessions stopped and their tasks re-queued")
             return 128 + e.signum
+        if unfinished:
+            shown = ", ".join(f"{t.id} ({t.status})" for t in unfinished[:_SHOW_UNFINISHED])
+            more = len(unfinished) - _SHOW_UNFINISHED
+            _err(f"backlog not complete: {shown}" + (f" +{more} more" if more > 0 else ""))
+            return EXIT_UNFINISHED
     elif args.command == "status":
         loop_mod.status(paths, config)
     elif args.command == "reap":
