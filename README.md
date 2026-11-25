@@ -82,18 +82,20 @@ clobber a skill you've edited.
 
 | Code | Meaning |
 |---|---|
-| 0 | The run ended and no task is `blocked` or `timeout`. |
+| 0 | The run ended and every task in `tasks/` is `done` (the backlog is complete). |
 | 1 | Refused: another `run` holds the run lock, or `run` was started inside a session. |
 | 2 | Invalid config, failed preflight, dirty base tree, or a halt (base-branch leak, base not checked out, failed merge undo). |
-| 3 | The run ended with at least one task `blocked` or `timeout`. |
+| 3 | The run ended and at least one task is not `done`. |
 | 130 / 143 | Stopped by SIGINT / SIGTERM (see below). |
 
-Code 3 checks every task in `tasks/` at run end, for every end reason (`drained`, `settled`,
-`max_iterations`, a budget cap, `rate_limited`). A task blocked by an earlier run also counts.
-Without a blocked or timed-out task, those reasons exit 0, even if `todo` work remains (for
-example after a budget cap or a rate limit). Use `autobuild status` or
-`.autobuild/run-summary.json` to see what remains. So `autobuild run && deploy` deploys only
-when nothing failed.
+Exit 0 means the backlog is complete. Any task that is not `done` at run end gives exit 3:
+`blocked`, `timeout`, an `invalid` task file, a task stuck on a missing, cyclic or duplicated
+dependency, a `review` task, or `todo` work left by `rate_limited`, a budget cap, or
+`max_iterations`. A task blocked by an earlier run also gives exit 3, because the backlog is
+not complete. A halted run keeps exit 2 and an interrupted run keeps 130 / 143. stderr names
+the first 10 tasks that are not `done`; `autobuild status` shows all of them. So
+`autobuild run && deploy` deploys only a complete backlog. `autobuild reap` still exits 0
+unless it halts (exit 2).
 
 ### Stopping a run
 

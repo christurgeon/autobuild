@@ -242,3 +242,16 @@ def test_main_line_buffers_redirected_stdout(tmp_path):
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     assert r.returncode == 0, r.stderr
     assert r.stderr.endswith("True")
+
+
+def test_run_unfinished_message_caps_task_list(tmp_path, monkeypatch, capsys):
+    """The exit-3 message names at most 10 not-done tasks, then '+N more'."""
+    from types import SimpleNamespace
+    monkeypatch.chdir(tmp_path)
+    cli.main(["init"])
+    left = [SimpleNamespace(id=f"task-{i:03d}", status="todo") for i in range(12)]
+    monkeypatch.setattr(loop_mod, "run", lambda paths, config: left)
+
+    assert cli.main(["run"]) == cli.EXIT_UNFINISHED
+    err = capsys.readouterr().err
+    assert "task-009 (todo)" in err and "task-010" not in err and "+2 more" in err
