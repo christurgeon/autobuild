@@ -15,7 +15,7 @@ from .common import _gh, _git, _read_json, current_branch, warn
 from .config import Config
 from .guards import BaseBranchNotCheckedOut, MergeUndoFailed
 from .paths import Paths
-from .tasks import load_task
+from .tasks import task_index
 from .verify import _write_checks_log
 from .worktree import branch_name
 
@@ -243,8 +243,8 @@ def _post_merge_verify(tid: str, branch: str, config: Config, paths: Paths, sdir
             if noop:
                 if interrupt.requested():  # the check may have died to Ctrl-C: reaper abandons
                     return False, f"post-merge checks failed for {branch} (no-op merge)"
-                meta = _read_json(sdir / "meta.json") or {}
-                task = load_task(Path(meta["task_file"])) if meta.get("task_file") else None
+                # by id from tasks/: meta.json's task_file is the staged copy, never `done`
+                task = task_index(paths.tasks_dir).get(tid)
                 if task and task.status == "done":
                     # set_status(done) runs only after these checks passed on this merge, so
                     # a re-reap failure is not this task's: keep the verified merge and status.

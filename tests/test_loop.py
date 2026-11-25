@@ -885,7 +885,14 @@ def test_noop_merge_already_done_task_keeps_verified_merge(git_repo, git):
     post-merge checks, so a failing re-run must neither undo it nor downgrade the task."""
     paths = setup(git_repo)
     sdir, _, merged = _noop_merge_setup(paths, git, git_repo)
+    # like a real session: meta.json points at the STAGED copy, which never says done
+    staged = sdir / "task-001.md"
+    staged.write_text((paths.tasks_dir / "task-001.md").read_text())
+    meta = json.loads((sdir / "meta.json").read_text())
+    meta["task_file"] = str(staged)
+    (sdir / "meta.json").write_text(json.dumps(meta))
     set_status(paths.tasks_dir / "task-001.md", "done")
+    assert read_task(staged).status != "done"
     cfg = Config(integration="auto-merge", checks=[_SKEW_CHECK])
 
     assert reap_session(sdir, cfg, paths) is True
