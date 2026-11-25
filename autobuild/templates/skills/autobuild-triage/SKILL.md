@@ -72,10 +72,11 @@ in files and git — read it before proposing anything.
    **A manual re-queue reuses the branch.** Setting a `blocked` or terminal `timeout` task
    back to `status: todo` **reuses the existing `autobuild/<id>` branch** and its earlier
    commits. The branch is not rebased onto the current base (done dependencies are still
-   merged in). That helps when the earlier work is worth keeping. For a fresh start, delete
-   the branch before the next run: `git branch -D autobuild/<id>` (run `git worktree prune`
-   first if git says the branch is checked out). The next `run` then forks again from
-   `base_branch`.
+   merged in). That helps when the earlier work is worth keeping. For a fresh start, rename
+   the branch out of the way before the next run: `git branch -m autobuild/<id>
+   salvage/<id>` (run `git worktree prune` first if git says the branch is checked out).
+   The next `run` then forks again from `base_branch`, and the old work stays on
+   `salvage/<id>`.
 5. **PR review for dependency chains (pr mode) — only if applicable.** *Skip this unless
    there are `done` tasks whose PRs form a dependency chain.* For a chain A → B → C,
    explain the stacked-history limitation — each PR contains its dependencies' commits —
@@ -139,4 +140,14 @@ kill happened, so check each state. `<base>` is `base_branch` in `.autobuild/con
 apply task edits or status flips only after the user approves. After a killed run,
 `autobuild reap`, `git revert`, and deleting a task file are changes too: propose each
 one first. Re-queueing is just setting `status:` back to `todo`; decide first whether to
-keep or delete `autobuild/<task-id>`.
+keep or set aside `autobuild/<task-id>`.
+
+**When unsure, ask.** If the evidence does not clearly show the cause, or a step is
+labeled a heuristic, show the human what you found and ask before you act. Do not guess.
+
+**Never erase work.** Do not run `git reset --hard`, `git branch -D`, `git clean`,
+`git checkout -- <path>`, `git push --force`, or `rm` on a branch, worktree, or task
+file. The one exception is a duplicate follow-up file from item 4 of the recovery section,
+removed only after the human confirms that pair. Keep work reachable instead: rename a branch to `salvage/<id>`, undo a merge with
+`git revert`, and reset `base_branch` only with `--keep` after a `salvage` branch points
+at the old tip. If the only fix seems to destroy work, stop and ask the human.
