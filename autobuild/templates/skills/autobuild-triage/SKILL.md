@@ -1,6 +1,6 @@
 ---
 name: autobuild-triage
-description: Use after an autobuild run when tasks are blocked, timed out, or the backlog settled and you need to understand why and what to do — diagnose from result.json sentinels, session logs, and preserved branches, then propose fixes, re-queues, or merges. Triggers on "why did this task block", "what's stuck", "triage the run", "help me unblock", "the backlog settled", "review the autobuild PRs".
+description: Use after an autobuild run when tasks are blocked, timed out, or the backlog settled and you need to understand why and what to do — diagnose from result.json sentinels, session logs, and preserved branches, then propose fixes, re-queues, or merges. Also use after a force-killed or crashed run to find and fix the states a kill during a reap can leave. Triggers on "why did this task block", "what's stuck", "triage the run", "help me unblock", "the backlog settled", "review the autobuild PRs", "the run was killed", "autobuild crashed", "main is broken after autobuild".
 ---
 
 # autobuild: triage a settled run
@@ -57,8 +57,9 @@ in files and git — read it before proposing anything.
      instead of its own branch; `leak.json` lists the offending `commits`. In `auto-merge`
      this halts the run (`BaseBranchLeak`, exit 2) and re-fires every run until base is
      clean; in `pr`/`branch` it only blocks that task. Recover: move the leaked commit(s)
-     onto a branch and reset `base_branch` back (`git branch salvage <sha>; git reset --hard
-     <sha-before-leak>`), then re-queue the task (`status: todo`). If it was a *concurrent*
+     onto a branch and reset `base_branch` back (`git branch salvage <sha>; git reset --keep
+     <sha-before-leak>`), then re-queue the task (`status: todo`). `--keep` keeps
+     uncommitted `tasks/` status lines; `--hard` would discard them. If it was a *concurrent*
      human/CI commit (not a real escape), just keep it and re-queue the task.
 4. **Propose a concrete next action per task** — tie it to the cause: edit the task to
    clarify/scope it down and re-queue (set `status: todo`), split it into follow-ups, fix the config (raise `task_timeout_seconds`, correct a
@@ -71,17 +72,82 @@ in files and git — read it before proposing anything.
    **A manual re-queue reuses the branch.** Setting a `blocked` or terminal `timeout` task
    back to `status: todo` **reuses the existing `autobuild/<id>` branch** and its earlier
    commits. The branch is not rebased onto the current base (done dependencies are still
-   merged in). That helps when the earlier work is worth keeping. For a fresh start, delete
-   the branch before the next run: `git branch -D autobuild/<id>` (run `git worktree prune`
-   first if git says the branch is checked out). The next `run` then forks again from
-   `base_branch`.
+   merged in). That helps when the earlier work is worth keeping. For a fresh start, rename
+   the branch out of the way before the next run: `git branch -m autobuild/<id>
+   salvage/<id>` (run `git worktree prune` first if git says the branch is checked out).
+   The next `run` then forks again from `base_branch`, and the old work stays on
+   `salvage/<id>`.
 5. **PR review for dependency chains (pr mode) — only if applicable.** *Skip this unless
    there are `done` tasks whose PRs form a dependency chain.* For a chain A → B → C,
    explain the stacked-history limitation — each PR contains its dependencies' commits —
    and recommend merging in **dependency order**, or onto one integration branch.
 
+## Recovering after a killed run
+
+Use this when a `run` was force-killed (SIGKILL, crash, power loss). A kill during a reap
+can leave the states below, and the harness does not detect them. No file records that a
+kill happened, so check each state. `<base>` is `base_branch` in `.autobuild/config.yml`.
+
+1. **Stop, then settle.** Confirm that no run is active: `pgrep -fl "autobuild run"`
+   prints nothing. Then run `autobuild reap` (same fallbacks as `status`). It recovers
+   orphans and reaps finished sessions, as the next `run` would. List sessions still
+   unreaped: `for d in .autobuild/sessions/*/; do [ -f "$d/reaped.json" ] || echo "$d"; done`.
+   An unreaped session usually has a broken task file (see above); fix it and reap again.
+   **Do this before any commit to `<base>`.** A reap compares `<base>` to the session's
+   `base_sha`, so a revert or fix commit looks like a base leak to an unreaped session.
+2. **Red base (`auto-merge` only).** Run each `checks:` command from the config in the
+   main checkout on `<base>`. If one fails, base is red: every merge after it failed the
+   post-merge checks, was undone, and its task was blocked. Find the first bad commit.
+   `git log --first-parent --format='%h %s' <base>` lists base's history; harness merges
+   have the subject `autobuild: merge <task-id>`. Test a candidate in a scratch worktree:
+   `git worktree add --detach <dir> <sha>`, run the checks there, then
+   `git worktree remove <dir>`. The cause can also be a human commit or the environment
+   (a missing tool); fix that instead. Undo a bad harness merge with
+   `git revert -m 1 <merge-sha>`. It adds a commit and keeps the uncommitted `tasks/`
+   status lines. **Never `git reset --hard` here** — it discards those lines. Then set
+   that task to `status: todo`. A successful auto-merge deleted its branch, so the retry
+   forks from the fixed base.
+3. **Tasks blocked by a broken merge.** The post-merge gate writes
+   `post-merge-checks.log` in the session dir. Find them with
+   `ls .autobuild/sessions/*/post-merge-checks.log`. The `task` field in that session's
+   `meta.json` names the task. Keep only tasks now `blocked` (`reaped.json` has
+   `"integrated": false`). Re-queue them (`status: todo`) only after base passes the
+   checks. Their branch is kept, so the retry reuses that work. If base passes but the log
+   shows the task's own change failing, it is merge skew: treat it as "checks failed".
+4. **Follow-ups filed twice.** A kill after a COMPLETE session filed its follow-ups, but
+   before `reaped.json`, makes the next reap file them again under new ids. Follow-up
+   files have no parent field. Heuristic: find repeated titles with
+   `grep -h '^title:' tasks/*.md | sort | uniq -d`, and match them against the session's
+   `result.json` `followups[]`. Generated files contain "filed automatically by autobuild
+   as a follow-up". That session's `reaped.json` `followups` lists only the last filing's
+   ids. Propose to keep one copy per title. Before deleting a copy, run
+   `grep -l '<id>' tasks/*.md` and point any `depends_on` at the kept id. Two real
+   follow-ups can share a title, so confirm each pair with the human.
+5. **A `done` task with nothing merged.** A COMPLETE session with an empty branch passes
+   the checks and is marked `done`. Heuristic, per mode: in `auto-merge`,
+   `git log --first-parent --format=%h --grep='^autobuild: merge <id>$' <base>` prints
+   nothing; in `pr`/`branch`, `git log --first-parent --no-merges --oneline
+   <base>..autobuild/<id>` prints nothing (dependency merges are excluded). A human may
+   also have set `done` by hand. Ask before re-queueing.
+6. **A finished task flipped to `blocked`.** A kill after the reap removed the worktree,
+   but before `reaped.json`, fails the next reap's verification. Its `checks.log` shows
+   `command: (pre-flight)` and "is missing; cannot verify checks". The work may already be
+   integrated; check with the commands in item 5. If it is, propose `status: done`.
+
 ## Guardrail
 
 **Never mutate the backlog silently.** Present the triage and the proposed changes first;
-apply task edits or status flips only after the user approves. Re-queueing is just setting
-`status:` back to `todo`; decide first whether to keep or delete `autobuild/<task-id>`.
+apply task edits or status flips only after the user approves. After a killed run,
+`autobuild reap`, `git revert`, and deleting a task file are changes too: propose each
+one first. Re-queueing is just setting `status:` back to `todo`; decide first whether to
+keep or set aside `autobuild/<task-id>`.
+
+**When unsure, ask.** If the evidence does not clearly show the cause, or a step is
+labeled a heuristic, show the human what you found and ask before you act. Do not guess.
+
+**Never erase work.** Do not run `git reset --hard`, `git branch -D`, `git clean`,
+`git checkout -- <path>`, `git push --force`, or `rm` on a branch, worktree, or task
+file. The one exception is a duplicate follow-up file from item 4 of the recovery section,
+removed only after the human confirms that pair. Keep work reachable instead: rename a branch to `salvage/<id>`, undo a merge with
+`git revert`, and reset `base_branch` only with `--keep` after a `salvage` branch points
+at the old tip. If the only fix seems to destroy work, stop and ask the human.
