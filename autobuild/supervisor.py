@@ -9,6 +9,7 @@ import contextlib
 import signal
 import subprocess
 import time
+from collections import Counter
 
 from . import interrupt
 from .common import _classify_sentinel, _notify, log, ok, warn
@@ -124,6 +125,17 @@ def _rate_limited(paths: Paths, config: Config, run_sids: set[str],
     return bool(hits)
 
 
+def _report_drained(tasks) -> None:
+    """Headline for a drained backlog: COMPLETE only if every task is `done`; otherwise
+    name the counts, so a blocked or timed-out task is not reported as success."""
+    counts = Counter(t.status for t in tasks)
+    if set(counts) <= {"done"}:
+        ok("backlog drained — COMPLETE")
+        return
+    shown = "  ".join(f"{s}={n}" for s, n in sorted(counts.items()))  # the digest's format
+    warn(f"backlog drained with unfinished work: {shown} — see 'autobuild status'")
+
+
 def _next_wait(running: list[RunningSession], sleep_seconds: float, now: float) -> float:
     """How long to sleep before the next harvest: the poll interval, but never past the
     nearest session deadline (so an over-deadline session is killed promptly), and never
@@ -233,7 +245,8 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession],
     with the live set IN PLACE (`running[:] = ...`) so a caller catching RunHalted
     can still see — and kill — what was running when the halt fired.
 
-    Returns the terminal reason the run ended for — `drained` (backlog empty),
+    Returns the terminal reason the run ended for — `drained` (every task terminal;
+    not necessarily all `done`),
     `settled` (only blocked/unsatisfiable work left), or one of the budget caps with work
     left unstarted: `max_iterations`, `run_budget_seconds`, `run_budget_usd` — so the caller
     records it in the run summary instead of re-deriving it — `rate_limited` after a
@@ -347,7 +360,7 @@ def _supervise(paths: Paths, config: Config, running: list[RunningSession],
                      f"{len(pending)} unfinished task(s) — see 'autobuild status'")
                 return "max_iterations"
             elif not pending:
-                ok("backlog drained — COMPLETE")
+                _report_drained(tasks)
                 return "drained"
             else:
                 stuck = stuck_tasks(tasks, index)

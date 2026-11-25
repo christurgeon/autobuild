@@ -180,6 +180,23 @@ def test_e2e_run_end_reports_complete_on_clean_drain(git_repo, stub_bin, monkeyp
     assert "cannot proceed" not in out
 
 
+def test_e2e_drain_with_blocked_task_is_not_reported_complete(git_repo, stub_bin, monkeypatch,
+                                                              capsys):
+    """Live run 2026-11-22: every task was terminal but one was blocked, and the run still
+    printed "backlog drained — COMPLETE". The headline now names the failures."""
+    stub_bin(STUB_STATUS_task_002="BLOCKED")
+    paths = init_project(git_repo, monkeypatch, integration="branch")
+    write_task(paths, "task-001")
+    write_task(paths, "task-002")  # independent: nothing is stuck, the backlog drains
+
+    loop_mod.run(paths, load_config(paths.config_file), sleep_seconds=5)
+
+    out = capsys.readouterr().out
+    assert "backlog drained — COMPLETE" not in out
+    assert "backlog drained with unfinished work: blocked=1  done=1" in out
+    assert "run ended: drained" in out  # the run-end reason is unchanged
+
+
 def test_e2e_malformed_task_file_settles_not_crashes(git_repo, stub_bin, monkeypatch, capsys):
     stub_bin()
     paths = init_project(git_repo, monkeypatch, integration="branch")
