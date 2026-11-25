@@ -9,6 +9,7 @@ import subprocess
 import time
 from pathlib import Path
 from shutil import which
+from typing import NoReturn
 
 from . import interrupt
 from .common import _gh, _git, _read_json, current_branch, warn
@@ -151,8 +152,10 @@ def _open_pr(root: Path, tid: str, branch: str, base: str, retries: int, sleep) 
 
 def integrate(tid: str, config: Config, paths: Paths, sdir: Path, *, sleep=time.sleep) -> tuple[bool, str]:
     """Integrate the task's branch per config. Returns (success, detail). Failure means
-    the work did not land: an auto-merge conflict, or (auto-merge only) a clean merge whose
-    COMBINED base tree fails the post-merge checks — that merge is reverted. pr/branch always
+    the work did not land: an auto-merge conflict, or (auto-merge only) a COMBINED base tree
+    that fails the post-merge checks. Base is restored in that case, except when there was no
+    merge commit to revert (branch already contained in base) or during a shutdown when the
+    merge cannot be undone (left for the next run; see _reverify_merge). pr/branch always
     succeed because the branch itself is the deliverable. `sdir` is the session dir, used for
     the post-merge forensic log.
 
@@ -223,6 +226,8 @@ def integrate(tid: str, config: Config, paths: Paths, sdir: Path, *, sleep=time.
         try:
             _undo_merge(paths, pre_merge_sha)
         except MergeUndoFailed:
+            if interrupt.requested():
+                return _left_for_next_run(branch, base)
             _atomic_write_json(marker, {**rec, "failed": True})
             raise
         marker.unlink(missing_ok=True)
@@ -258,16 +263,18 @@ def _reverify_merge(tid: str, branch: str, config: Config, paths: Paths, sdir: P
     plain `reset --merge` only while base is still on the merge commit. The footprint fallback
     of _undo_merge is NOT used here: a status write since the crash can dirty a merged
     `tasks/` file, and that write must not be discarded. Otherwise halt (MergeUndoFailed),
-    and mark merge.json `failed` so a later re-reap never marks the task done."""
+    and mark merge.json `failed` ("halted, needs a human"): every later re-reap halts again
+    while the merge is on base, so the task is never marked done on a tree a human changed."""
     root, base = paths.root, config.base_branch
     pre, merge = str(rec.get("pre_merge_sha", "")), str(rec.get("merge_sha", ""))
-    if rec.get("failed"):
-        return False, f"merge {merge} of {branch} failed post-merge checks earlier; not integrated"
     if not merge or _git(root, "merge-base", "--is-ancestor", merge,
                          f"refs/heads/{base}").returncode != 0:
         # Base was reset or rewritten by hand: nothing of ours to undo. Re-merging would
         # override that operator decision, so block the task (branch kept) and go on.
         return False, f"earlier merge {merge} of {branch} is no longer on {base}; not re-merged"
+    if rec.get("failed"):
+        _halt_on_merge(tid, branch, base, sdir, rec, "an earlier reap halted on it and it is "
+                       "still on base")
     warn(f"{branch} was merged into {base} at {merge[:12]} by an interrupted reap; "
          f"re-running the post-merge checks")
     if _post_merge_checks_pass(config, paths, sdir):
@@ -279,11 +286,22 @@ def _reverify_merge(tid: str, branch: str, config: Config, paths: Paths, sdir: P
             return False, f"post-merge checks failed for {branch}; merge reverted"
         why = f"`git reset --merge {pre}` refused ({r.stderr.strip()})"
     else:
-        if interrupt.requested():
-            warn(f"post-merge checks failed for {branch} during shutdown; {base} keeps the "
-                 f"merge until the next run re-checks it")
-            return False, f"post-merge checks failed for {branch}; merge not undone"
         why = f"later commits sit on top of merge {merge}"
+    if interrupt.requested():
+        return _left_for_next_run(branch, base)
+    _halt_on_merge(tid, branch, base, sdir, rec, why)
+
+
+def _left_for_next_run(branch: str, base: str) -> tuple[bool, str]:
+    """Shutdown-safe failure: a SIGINT may have caused the check failure, so leave the merge
+    and an unmarked merge.json; the reaper abandons the reap and the next run re-checks."""
+    warn(f"post-merge checks failed for {branch} during shutdown; {base} keeps the merge "
+         f"until the next run re-checks it")
+    return False, f"post-merge checks failed for {branch}; merge not undone"
+
+
+def _halt_on_merge(tid: str, branch: str, base: str, sdir: Path, rec: dict, why: str) -> NoReturn:
+    merge = rec.get("merge_sha", "")
     _atomic_write_json(sdir / "merge.json", {**rec, "failed": True})
     raise MergeUndoFailed(
         f"post-merge checks failed for {branch} and autobuild will not undo it: {why}. "

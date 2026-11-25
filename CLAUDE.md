@@ -175,10 +175,14 @@ Module responsibilities:
   `reaped.json`) never merges again and re-runs the checks. Pass: integrated. Fail with base still
   on `merge_sha`: a plain `reset --merge` only (no footprint fallback, so a `tasks/` status write
   since the crash is never discarded). Fail otherwise (later commits on top), or that reset
-  refuses: `MergeUndoFailed`, and `merge.json` is marked `failed` so a later re-reap blocks the
-  task instead of marking it done (during a shutdown: return failure, base keeps the merge until
-  the next run). `merge_sha` no longer on base (reset by hand): block, never re-merge. This only
-  covers merge handling: a crash after `file_followups` can still file follow-ups twice.
+  refuses: `MergeUndoFailed`, and `merge.json` is marked `failed` ("halted, needs a human"):
+  every later re-reap halts again while `merge_sha` is on base, so the task is never marked done.
+  During a shutdown nothing is marked: return failure, base keeps the merge, and the next run
+  re-checks. `merge_sha` no longer on base (reset by hand): block, never re-merge. The reaper
+  skips the pre-merge `verify_checks` gate when `merge.json` exists (the merge already landed;
+  the worktree may be gone). Not covered: a crash between `git merge` returning and `merge.json`
+  being written behaves as before (the merge is not recognized), and a crash after
+  `file_followups` can still file follow-ups twice.
 - **`autobuild/reaper.py`** — `reap_session` / `_reap_session_locked` (under a per-session
   `_session_reap_lock`), `_handle_timeout`, `_requeue_fresh` (re-queue a killed session's task
   WITHOUT a `retries.json` entry — used for `INTERRUPTED`), `file_followups`, `reap_all` (takes

@@ -914,15 +914,23 @@ def test_rereap_halts_under_later_merges_and_never_marks_done(git_repo, git):
     assert not (sdir / "reaped.json").exists()
     assert not (sdir / "leak.json").exists()
 
+    assert json.loads((sdir / "merge.json").read_text())["failed"] is True
+
+    # a plain re-run halts again: never block-and-continue on a red base
+    with pytest.raises(loop_mod.MergeUndoFailed, match="halted on it"):
+        reap_session(sdir, cfg, paths)
+    assert _sha(git, git_repo, "main") == tip
+
     # the operator reverts on a branch and merges it --no-ff, but keeps the session dir:
     # the checks now pass on the reverted tree, yet the task must not become done
     git(git_repo, "checkout", "-q", "-b", "fix")
     git(git_repo, "revert", "--no-edit", "-m", "1", merged)
     git(git_repo, "checkout", "-q", "main")
     git(git_repo, "merge", "--no-ff", "-q", "-m", "revert task-001", "fix")
-    assert reap_session(sdir, cfg, paths) is True
-    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
-    assert json.loads((sdir / "reaped.json").read_text())["integrated"] is False
+    with pytest.raises(loop_mod.MergeUndoFailed, match="halted on it"):
+        reap_session(sdir, cfg, paths)
+    assert read_task(paths.tasks_dir / "task-001.md").status == "in-progress"
+    assert not (sdir / "reaped.json").exists()
 
 
 def test_rereap_blocks_when_operator_reset_merge_away(git_repo, git):
@@ -962,6 +970,60 @@ def test_rereap_halts_rather_than_discard_dirty_task_file(git_repo, git):
     assert _sha(git, git_repo, "main") == merged
     assert read_task(paths.tasks_dir / "task-002.md").status == "done"
     assert not (sdir / "reaped.json").exists()
+
+
+def test_rereap_shutdown_never_marks_merge_failed(git_repo, git, monkeypatch):
+    paths = setup(git_repo)
+    _commit_tasks(paths, git, "task-001")
+    sdir = _skew_setup(paths, git)
+    _, merged = _crashed_merge(paths, git, sdir)
+    real_git = integrate_mod._git
+
+    def refuse_reset(root, *args):
+        if args[:2] == ("reset", "--merge"):
+            return subprocess.CompletedProcess(args, 128, "", "fatal: not uptodate")
+        return real_git(root, *args)
+
+    monkeypatch.setattr(integrate_mod, "_git", refuse_reset)
+    monkeypatch.setattr(interrupt_mod, "requested", lambda: True)
+    cfg = Config(integration="auto-merge", checks=[_SKEW_CHECK])
+
+    assert reap_session(sdir, cfg, paths) is False  # abandoned, not halted
+    assert _sha(git, git_repo, "main") == merged
+    assert "failed" not in json.loads((sdir / "merge.json").read_text())
+
+
+def test_first_reap_shutdown_undo_failure_never_marks_merge_failed(git_repo, git, monkeypatch):
+    paths = setup(git_repo)
+    _commit_tasks(paths, git, "task-001")
+    sdir = _skew_setup(paths, git)
+    real_git = integrate_mod._git
+
+    def refuse_reset(root, *args):
+        if args[:2] == ("reset", "--merge"):
+            return subprocess.CompletedProcess(args, 128, "", "fatal: not uptodate")
+        return real_git(root, *args)
+
+    monkeypatch.setattr(integrate_mod, "_git", refuse_reset)
+    monkeypatch.setattr(interrupt_mod, "requested", lambda: True)
+    cfg = Config(integration="auto-merge", checks=[_SKEW_CHECK])
+
+    assert reap_session(sdir, cfg, paths) is False
+    assert "failed" not in json.loads((sdir / "merge.json").read_text())
+
+
+def test_rereap_rechecks_recorded_merge_when_worktree_is_gone(git_repo, git):
+    paths = setup(git_repo)
+    _commit_tasks(paths, git, "task-001")
+    sdir = _skew_setup(paths, git)
+    pre, _ = _crashed_merge(paths, git, sdir)
+    git(git_repo, "worktree", "remove", "--force", str(paths.worktrees_dir / "sess-task-001"))
+    cfg = Config(integration="auto-merge", checks=[_SKEW_CHECK])
+
+    assert reap_session(sdir, cfg, paths) is True
+    assert _sha(git, git_repo, "main") == pre  # re-checked and undone, not "worktree missing"
+    assert (sdir / "post-merge-checks.log").exists()
+    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
 
 
 def test_rereap_shutdown_leaves_unundoable_merge_and_abandons(git_repo, git, monkeypatch):

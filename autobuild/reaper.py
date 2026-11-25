@@ -88,9 +88,9 @@ def reap_session(sdir: Path, config: Config, paths: Paths) -> bool:
     concurrency-safe: the reaped.json marker guards re-runs, and a per-session
     NON-BLOCKING flock serializes a `run` and a concurrent `reap` so only one integrates
     (no duplicate PRs / follow-ups). Returns True if it acted, False if skipped/not finished.
-    NOTE: the lock closes the *concurrent* double-integration; a crash *mid-integrate*
-    (push ok, then death before the marker) is not covered — `integrate` isn't idempotent
-    across a crash. That's a separate concern (out of scope here)."""
+    NOTE: the lock closes the *concurrent* double-integration. Across a crash, auto-merge
+    re-reaps via <sdir>/merge.json (never merges twice); pr mode (push ok, then death before
+    the marker) and follow-up filing are not idempotent across a crash."""
     if (sdir / "reaped.json").exists():
         return False  # fast path (best-effort): already reaped
     result = _read_json(sdir / "result.json")
@@ -251,7 +251,12 @@ def _reap_session_locked(sdir: Path, result: dict, config: Config, paths: Paths)
     if status == "COMPLETE":
         # Trust, but verify: re-run the checks against the committed tree ourselves
         # before integrating. A tree that fails verification is blocked, not merged.
-        verified, checks_outcome = verify_checks(config, paths, sdir, sid)
+        # A recorded merge (merge.json: an earlier reap merged, then died) already landed:
+        # integrate's post-merge re-check is the gate, even if the worktree is gone.
+        if (sdir / "merge.json").exists():
+            verified, checks_outcome = True, "skipped (merge recorded)"
+        else:
+            verified, checks_outcome = verify_checks(config, paths, sdir, sid)
         if not verified and interrupt.requested():
             return _abandon_for_shutdown(sid, tid, f"verification {checks_outcome}")
         if not verified:
