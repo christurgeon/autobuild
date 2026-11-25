@@ -877,7 +877,33 @@ def test_noop_merge_buried_under_later_commit_is_not_reverted(git_repo, git, cap
     assert _branch_exists(git, git_repo, "task-001")
     out = capsys.readouterr()
     log = out.out + out.err
-    assert "merge reverted" not in log and "nothing was reverted" in log
+    assert "merge reverted" not in log and "nothing reverted" in log
+
+
+def test_noop_merge_already_done_task_keeps_verified_merge(git_repo, git):
+    """Crash after set_status(done) but before reaped.json: the merge already passed its
+    post-merge checks, so a failing re-run must neither undo it nor downgrade the task."""
+    paths = setup(git_repo)
+    sdir, _, merged = _noop_merge_setup(paths, git, git_repo)
+    set_status(paths.tasks_dir / "task-001.md", "done")
+    cfg = Config(integration="auto-merge", checks=[_SKEW_CHECK])
+
+    assert reap_session(sdir, cfg, paths) is True
+    assert git(git_repo, "rev-parse", "HEAD").stdout.strip() == merged
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"
+    assert json.loads((sdir / "reaped.json").read_text())["integrated"] is True
+
+
+def test_noop_merge_own_merge_passing_checks_reports_earlier_reap(git_repo, git, capsys):
+    paths = setup(git_repo)
+    sdir, _, merged = _noop_merge_setup(paths, git, git_repo)
+    cfg = Config(integration="auto-merge", checks=["true"])
+
+    assert reap_session(sdir, cfg, paths) is True
+    assert git(git_repo, "rev-parse", "HEAD").stdout.strip() == merged
+    assert read_task(paths.tasks_dir / "task-001.md").status == "done"
+    out = capsys.readouterr()
+    assert "(by an earlier interrupted reap)" in out.out + out.err
 
 
 def test_noop_merge_of_requeued_done_task_is_not_reverted(git_repo, git):
@@ -919,7 +945,7 @@ def test_noop_merge_empty_branch_failing_checks_is_not_reverted(git_repo, git, c
     assert (sdir / "post-merge-checks.log").exists()
     out = capsys.readouterr()
     log = out.out + out.err
-    assert "merge reverted" not in log and "nothing was reverted" in log
+    assert "merge reverted" not in log and "nothing reverted" in log
 
 
 def test_noop_merge_failing_checks_during_shutdown_is_abandoned(git_repo, git, monkeypatch):

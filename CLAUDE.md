@@ -288,7 +288,8 @@ This is the part that requires reading multiple files to understand:
    `git reset --merge`** if they fail (fallback: reset the merge-footprint paths to HEAD, then
    `reset --merge` again; halts with `MergeUndoFailed` if that fails) — catching semantic merge skew two independently-green
    branches can produce with no textual conflict. If the merge was a no-op (base already
-   contained the branch) and the checks fail, the undo runs only when base's top commit is this
+   contained the branch) and the checks fail, a task whose file already says `done` (it passed
+   these checks before a crash) keeps its merge and status; otherwise the undo runs only when base's top commit is this
    session's own unverified merge (`_own_unverified_merge`: `HEAD^2` == the branch tip, the
    harness merge subject, and made after the session's `base_sha` — a run killed between the
    merge and `reaped.json`); otherwise (an empty branch, a re-queued task's earlier verified

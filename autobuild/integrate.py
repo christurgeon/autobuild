@@ -15,6 +15,7 @@ from .common import _gh, _git, _read_json, current_branch, warn
 from .config import Config
 from .guards import BaseBranchNotCheckedOut, MergeUndoFailed
 from .paths import Paths
+from .tasks import load_task
 from .verify import _write_checks_log
 from .worktree import branch_name
 
@@ -217,14 +218,20 @@ def _post_merge_verify(tid: str, branch: str, config: Config, paths: Paths, sdir
     it. On the first failing check, `_undo_merge` removes the merge commit (never leave base
     red) while keeping uncommitted task status and other local edits, write a forensic log,
     and report failure — the reaper then blocks the task and keeps the branch. If the merge
-    was a no-op (`noop`: base already contained the branch), the undo targets base's top
-    commit only when `_own_unverified_merge` finds it is this session's own merge (a run killed
-    before reaped.json); otherwise nothing is reverted, and the failure is reported with a warning.
+    was a no-op (`noop`: base already contained the branch) and the task file already says
+    `done` (it passed these checks before a crash), the merge and status are kept. Otherwise
+    the undo targets base's top commit only when `_own_unverified_merge` finds it is this
+    session's own merge (a run killed before reaped.json); else nothing is reverted.
     Skipped (merge stands) when verify_after_merge is off or
     there are no checks; independent of verify_checks (which gates the pre-merge worktree run)."""
     base = config.base_branch
-    landed = (f"{base} already contained {branch}; nothing merged" if noop
-              else f"merged {branch} into {base}")
+    own = _own_unverified_merge(paths.root, tid, branch, sdir) if noop else ""
+    if not noop:
+        landed = f"merged {branch} into {base}"
+    elif own:
+        landed = f"merged {branch} into {base} (by an earlier interrupted reap)"
+    else:
+        landed = f"{base} already contained {branch}; nothing merged"
     if not config.verify_after_merge or not config.checks:
         return True, landed
     for cmd in config.checks:
@@ -236,12 +243,17 @@ def _post_merge_verify(tid: str, branch: str, config: Config, paths: Paths, sdir
             if noop:
                 if interrupt.requested():  # the check may have died to Ctrl-C: reaper abandons
                     return False, f"post-merge checks failed for {branch} (no-op merge)"
-                own = _own_unverified_merge(paths.root, tid, branch, sdir)
+                meta = _read_json(sdir / "meta.json") or {}
+                task = load_task(Path(meta["task_file"])) if meta.get("task_file") else None
+                if task and task.status == "done":
+                    # set_status(done) runs only after these checks passed on this merge, so
+                    # a re-reap failure is not this task's: keep the verified merge and status.
+                    warn(f"{tid} is already done; a re-run post-merge check failed on {base} "
+                         f"at {pre_merge_sha[:12]} — merge kept; inspect {base}")
+                    return True, landed
                 if not own:
-                    warn(f"base {base} at {pre_merge_sha[:12]} already contained {branch} and "
-                         f"fails the post-merge checks; nothing was reverted; inspect {base}")
-                    return False, (f"post-merge checks failed for {branch}; {base} already "
-                                   f"contained it; nothing reverted")
+                    return False, (f"post-merge checks failed for {branch}; {base} at "
+                                   f"{pre_merge_sha[:12]} already contained it; nothing reverted")
                 pre_merge_sha = own
             _undo_merge(paths, pre_merge_sha)
             return False, f"post-merge checks failed for {branch}; merge reverted"
