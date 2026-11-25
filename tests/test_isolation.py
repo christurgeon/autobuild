@@ -323,8 +323,10 @@ def test_run_refuses_dirty_base(git_repo, monkeypatch):
     paths.config_file.write_text("base_branch: main\n", encoding="utf-8")
     (git_repo / "uncommitted.py").write_text("x = 1\n")
     monkeypatch.delenv("AUTOBUILD_ALLOW_DIRTY_BASE", raising=False)
-    with pytest.raises(loop_mod.DirtyBaseTree):
+    with pytest.raises(loop_mod.DirtyBaseTree) as ei:
         loop_mod.run(paths, Config(base_branch="main"))
+    # Live run 2026-11-22: post-merge checks left __pycache__/ here; name the real fix.
+    assert ".gitignore" in str(ei.value)
 
 
 def test_run_dirty_base_override_env(git_repo, monkeypatch, stub_bin):
