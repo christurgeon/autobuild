@@ -289,10 +289,13 @@ This is the part that requires reading multiple files to understand:
    `reset --merge` again; halts with `MergeUndoFailed` if that fails) — catching semantic merge skew two independently-green
    branches can produce with no textual conflict. If the merge was a no-op (base already
    contained the branch) and the checks fail, the undo runs only when base's top commit is this
-   branch's own merge (`HEAD^2` == branch tip: a run killed between the merge and `reaped.json`);
-   otherwise (an empty branch, or the merge buried under later commits) nothing is reverted, the
-   task is blocked, and a warning names base's sha. A crash between merge and `reaped.json` is not
-   otherwise recovered. Known limitation: if base itself fails the checks, every merge in the run
+   session's own unverified merge (`_own_unverified_merge`: `HEAD^2` == the branch tip, the
+   harness merge subject, and made after the session's `base_sha` — a run killed between the
+   merge and `reaped.json`); otherwise (an empty branch, a re-queued task's earlier verified
+   merge, a human's merge, or a merge buried under later commits) nothing is reverted, the task
+   is blocked, and a warning names base's sha. Beyond that failing-checks case, a crash between
+   merge and `reaped.json` needs no recovery: if the re-reap's checks pass, the task is marked
+   `done` normally. Known limitation: if base itself fails the checks, every merge in the run
    is undone and its task blocked; a red base is not detected as such. If the
    checks pass it **integrates** (`integrate` → `pr` via `gh` / `auto-merge` / `branch`) and only then
    `set_status`es the task `done` — so a failed auto-merge leaves the task `blocked`, not falsely

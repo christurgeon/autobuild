@@ -11,7 +11,7 @@ from pathlib import Path
 from shutil import which
 
 from . import interrupt
-from .common import _gh, _git, current_branch, warn
+from .common import _gh, _git, _read_json, current_branch, warn
 from .config import Config
 from .guards import BaseBranchNotCheckedOut, MergeUndoFailed
 from .paths import Paths
@@ -218,12 +218,13 @@ def _post_merge_verify(tid: str, branch: str, config: Config, paths: Paths, sdir
     red) while keeping uncommitted task status and other local edits, write a forensic log,
     and report failure — the reaper then blocks the task and keeps the branch. If the merge
     was a no-op (`noop`: base already contained the branch), the undo targets base's top
-    commit only when it is this branch's own merge (HEAD^2 == branch tip: a run killed before
-    reaped.json); otherwise nothing is reverted, and the failure is reported with a warning.
+    commit only when `_own_unverified_merge` finds it is this session's own merge (a run killed
+    before reaped.json); otherwise nothing is reverted, and the failure is reported with a warning.
     Skipped (merge stands) when verify_after_merge is off or
     there are no checks; independent of verify_checks (which gates the pre-merge worktree run)."""
     base = config.base_branch
-    landed = f"merged {branch} into {base}"
+    landed = (f"{base} already contained {branch}; nothing merged" if noop
+              else f"merged {branch} into {base}")
     if not config.verify_after_merge or not config.checks:
         return True, landed
     for cmd in config.checks:
@@ -235,17 +236,33 @@ def _post_merge_verify(tid: str, branch: str, config: Config, paths: Paths, sdir
             if noop:
                 if interrupt.requested():  # the check may have died to Ctrl-C: reaper abandons
                     return False, f"post-merge checks failed for {branch} (no-op merge)"
-                root = paths.root
-                parent2 = _git(root, "rev-parse", "--verify", "-q", "HEAD^2").stdout.strip()
-                if not parent2 or parent2 != _git(root, "rev-parse", branch).stdout.strip():
+                own = _own_unverified_merge(paths.root, tid, branch, sdir)
+                if not own:
                     warn(f"base {base} at {pre_merge_sha[:12]} already contained {branch} and "
                          f"fails the post-merge checks; nothing was reverted; inspect {base}")
                     return False, (f"post-merge checks failed for {branch}; {base} already "
                                    f"contained it; nothing reverted")
-                pre_merge_sha = _git(root, "rev-parse", "HEAD^1").stdout.strip()
+                pre_merge_sha = own
             _undo_merge(paths, pre_merge_sha)
             return False, f"post-merge checks failed for {branch}; merge reverted"
     return True, landed
+
+
+def _own_unverified_merge(root: Path, tid: str, branch: str, sdir: Path) -> str:
+    """HEAD^1 if base's top commit is the harness merge of `branch` made after this session
+    started (a reap killed before reaped.json), else "". A merge that predates the session's
+    base_sha (an earlier, verified run of a re-queued task) or a human's merge never matches."""
+    base_sha = str((_read_json(sdir / "meta.json") or {}).get("base_sha", ""))
+    parent2 = _git(root, "rev-parse", "--verify", "-q", "HEAD^2").stdout.strip()
+    tip = _git(root, "rev-parse", "--verify", "-q", f"refs/heads/{branch}").stdout.strip()
+    subject = _git(root, "log", "-1", "--format=%s", "HEAD").stdout.strip()
+    if (not base_sha or not parent2 or parent2 != tip
+            or subject != f"autobuild: merge {tid}"
+            # exit 1 = HEAD is not an ancestor of base_sha (made after the session started);
+            # 0 = it predates the session, 128 = base_sha unresolvable
+            or _git(root, "merge-base", "--is-ancestor", "HEAD", base_sha).returncode != 1):
+        return ""
+    return _git(root, "rev-parse", "HEAD^1").stdout.strip()
 
 
 def _undo_merge(paths: Paths, pre_merge_sha: str) -> None:

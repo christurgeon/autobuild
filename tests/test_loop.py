@@ -826,15 +826,22 @@ def test_post_merge_undo_failure_halts(git_repo, git, monkeypatch):
     assert read_task(paths.tasks_dir / "task-001.md").status == "in-progress"
 
 
-def _noop_merge_setup(paths, git, repo):
-    """Base already holds the harness-style merge of autobuild/task-001 (a prior reap
-    merged, then died before reaped.json), and the combined tree fails _SKEW_CHECK: the
-    re-reap's merge is a no-op. Returns (sdir, pre-merge sha, merge sha)."""
+def _set_base_sha(sdir, sha):
+    meta = json.loads((sdir / "meta.json").read_text())
+    meta["base_sha"] = sha
+    (sdir / "meta.json").write_text(json.dumps(meta))
+
+
+def _noop_merge_setup(paths, git, repo, msg="autobuild: merge task-001"):
+    """Base already holds a merge of autobuild/task-001 (by default the harness-style one: a
+    prior reap merged, then died before reaped.json), and the combined tree fails
+    _SKEW_CHECK: the re-reap's merge is a no-op. The session started before the merge
+    (base_sha = pre-merge). Returns (sdir, pre-merge sha, merge sha)."""
     _commit_tasks(paths, git, "task-001")
     sdir = _skew_setup(paths, git)
     pre = git(repo, "rev-parse", "HEAD").stdout.strip()
-    git(repo, "merge", "--no-ff", "-q", "-m", "autobuild: merge task-001",
-        "autobuild/task-001")
+    _set_base_sha(sdir, pre)
+    git(repo, "merge", "--no-ff", "-q", "-m", msg, "autobuild/task-001")
     return sdir, pre, git(repo, "rev-parse", "HEAD").stdout.strip()
 
 
@@ -855,9 +862,12 @@ def test_noop_merge_own_unverified_merge_on_top_is_reverted(git_repo, git, capsy
 def test_noop_merge_buried_under_later_commit_is_not_reverted(git_repo, git, capsys):
     paths = setup(git_repo)
     sdir, _, _ = _noop_merge_setup(paths, git, git_repo)
+    git(git_repo, "checkout", "-q", "-b", "later")  # later work lands via --no-ff (no leak)
     (git_repo / "later.txt").write_text("l")
     git(git_repo, "add", "later.txt")
     git(git_repo, "commit", "-q", "-m", "later work")
+    git(git_repo, "checkout", "-q", "main")
+    git(git_repo, "merge", "--no-ff", "-q", "-m", "autobuild: merge later", "later")
     head = git(git_repo, "rev-parse", "HEAD").stdout.strip()
     cfg = Config(integration="auto-merge", checks=[_SKEW_CHECK])
 
@@ -868,6 +878,30 @@ def test_noop_merge_buried_under_later_commit_is_not_reverted(git_repo, git, cap
     out = capsys.readouterr()
     log = out.out + out.err
     assert "merge reverted" not in log and "nothing was reverted" in log
+
+
+def test_noop_merge_of_requeued_done_task_is_not_reverted(git_repo, git):
+    """Task already merged + verified earlier; a human re-queued it, the branch is reused at
+    the old tip and gains nothing. The merge predates this session (base_sha = merge), so a
+    failing check must not drop the verified merge."""
+    paths = setup(git_repo)
+    sdir, _, merged = _noop_merge_setup(paths, git, git_repo)
+    _set_base_sha(sdir, merged)
+    cfg = Config(integration="auto-merge", checks=[_SKEW_CHECK])
+
+    assert reap_session(sdir, cfg, paths) is True
+    assert git(git_repo, "rev-parse", "HEAD").stdout.strip() == merged
+    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
+
+
+def test_noop_merge_by_human_is_not_reverted(git_repo, git):
+    paths = setup(git_repo)
+    sdir, _, merged = _noop_merge_setup(paths, git, git_repo, msg="manual merge")
+    cfg = Config(integration="auto-merge", checks=[_SKEW_CHECK])
+
+    assert reap_session(sdir, cfg, paths) is True
+    assert git(git_repo, "rev-parse", "HEAD").stdout.strip() == merged
+    assert read_task(paths.tasks_dir / "task-001.md").status == "blocked"
 
 
 def test_noop_merge_empty_branch_failing_checks_is_not_reverted(git_repo, git, capsys):
@@ -900,7 +934,7 @@ def test_noop_merge_failing_checks_during_shutdown_is_abandoned(git_repo, git, m
     assert read_task(paths.tasks_dir / "task-001.md").status == "in-progress"
 
 
-def test_noop_merge_empty_branch_passing_checks_integrates(git_repo, git):
+def test_noop_merge_empty_branch_passing_checks_integrates(git_repo, git, capsys):
     paths = setup(git_repo)
     _commit_tasks(paths, git, "task-001")
     make_worktree(paths, "sess-task-001", "task-001", "main")  # branch has no commits
@@ -912,6 +946,8 @@ def test_noop_merge_empty_branch_passing_checks_integrates(git_repo, git):
     assert git(git_repo, "rev-parse", "HEAD").stdout.strip() == head
     assert read_task(paths.tasks_dir / "task-001.md").status == "done"
     assert json.loads((sdir / "reaped.json").read_text())["integrated"] is True
+    out = capsys.readouterr()
+    assert "main already contained autobuild/task-001; nothing merged" in out.out + out.err
 
 
 # ---- auto-merge requires base_branch checked out ----------------------------
