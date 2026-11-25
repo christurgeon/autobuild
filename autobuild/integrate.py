@@ -10,10 +10,12 @@ import time
 from pathlib import Path
 from shutil import which
 
-from .common import _gh, _git, current_branch, warn
+from . import interrupt
+from .common import _gh, _git, _read_json, current_branch, warn
 from .config import Config
 from .guards import BaseBranchNotCheckedOut, MergeUndoFailed
 from .paths import Paths
+from .tasks import task_index
 from .verify import _write_checks_log
 from .worktree import branch_name
 
@@ -150,7 +152,8 @@ def _open_pr(root: Path, tid: str, branch: str, base: str, retries: int, sleep) 
 def integrate(tid: str, config: Config, paths: Paths, sdir: Path, *, sleep=time.sleep) -> tuple[bool, str]:
     """Integrate the task's branch per config. Returns (success, detail). Failure means
     the work did not land: an auto-merge conflict, or (auto-merge only) a clean merge whose
-    COMBINED base tree fails the post-merge checks — that merge is reverted. pr/branch always
+    COMBINED base tree fails the post-merge checks — that merge is reverted (a no-op merge is
+    reverted only when base's top commit is this branch's own merge). pr/branch always
     succeed because the branch itself is the deliverable. `sdir` is the session dir, used for
     the post-merge forensic log.
 
@@ -200,23 +203,35 @@ def integrate(tid: str, config: Config, paths: Paths, sdir: Path, *, sleep=time.
         if r.returncode != 0:
             _git(root, "merge", "--abort")  # don't leave the repo mid-merge
             return False, f"auto-merge conflict for {branch}"
-        return _post_merge_verify(tid, branch, config, paths, sdir, pre_merge_sha)
+        noop = _git(root, "rev-parse", "HEAD").stdout.strip() == pre_merge_sha
+        return _post_merge_verify(tid, branch, config, paths, sdir, pre_merge_sha, noop)
 
     return False, f"unknown integration mode '{mode}'"
 
 
 def _post_merge_verify(tid: str, branch: str, config: Config, paths: Paths, sdir: Path,
-                       pre_merge_sha: str) -> tuple[bool, str]:
+                       pre_merge_sha: str, noop: bool = False) -> tuple[bool, str]:
     """After an auto-merge lands, re-run config.checks against the COMBINED base working
     tree (paths.root). Two independently-green branches can still merge into a red base with
     no textual conflict (semantic skew: A renames a helper, B adds a caller of the old name);
     the pre-merge gate only ever saw each branch alone, so this is the only place that catches
     it. On the first failing check, `_undo_merge` removes the merge commit (never leave base
     red) while keeping uncommitted task status and other local edits, write a forensic log,
-    and report failure — the reaper then blocks the task and keeps the branch. Skipped (merge stands) when verify_after_merge is off or
+    and report failure — the reaper then blocks the task and keeps the branch. If the merge
+    was a no-op (`noop`: base already contained the branch) and the task file already says
+    `done` (it passed these checks before a crash), the merge and status are kept. Otherwise
+    the undo targets base's top commit only when `_own_unverified_merge` finds it is this
+    session's own merge (a run killed before reaped.json); else nothing is reverted.
+    Skipped (merge stands) when verify_after_merge is off or
     there are no checks; independent of verify_checks (which gates the pre-merge worktree run)."""
     base = config.base_branch
-    landed = f"merged {branch} into {base}"
+    own = _own_unverified_merge(paths.root, tid, branch, sdir) if noop else ""
+    if not noop:
+        landed = f"merged {branch} into {base}"
+    elif own:
+        landed = f"merged {branch} into {base} (by an earlier interrupted reap)"
+    else:
+        landed = f"{base} already contained {branch}; nothing merged"
     if not config.verify_after_merge or not config.checks:
         return True, landed
     for cmd in config.checks:
@@ -225,9 +240,41 @@ def _post_merge_verify(tid: str, branch: str, config: Config, paths: Paths, sdir
         if r.returncode != 0:
             _write_checks_log(sdir, cmd, r.returncode, r.stdout, r.stderr,
                               name="post-merge-checks.log")
+            if noop:
+                if interrupt.requested():  # the check may have died to Ctrl-C: reaper abandons
+                    return False, f"post-merge checks failed for {branch} (no-op merge)"
+                # by id from tasks/: meta.json's task_file is the staged copy, never `done`
+                task = task_index(paths.tasks_dir).get(tid)
+                if task and task.status == "done":
+                    # set_status(done) runs only after these checks passed on this merge, so
+                    # a re-reap failure is not this task's: keep the verified merge and status.
+                    warn(f"{tid} is already done; a re-run post-merge check failed on {base} "
+                         f"at {pre_merge_sha[:12]} — merge kept; inspect {base}")
+                    return True, landed
+                if not own:
+                    return False, (f"post-merge checks failed for {branch}; {base} at "
+                                   f"{pre_merge_sha[:12]} already contained it; nothing reverted")
+                pre_merge_sha = own
             _undo_merge(paths, pre_merge_sha)
             return False, f"post-merge checks failed for {branch}; merge reverted"
     return True, landed
+
+
+def _own_unverified_merge(root: Path, tid: str, branch: str, sdir: Path) -> str:
+    """HEAD^1 if base's top commit is the harness merge of `branch` made after this session
+    started (a reap killed before reaped.json), else "". A merge that predates the session's
+    base_sha (an earlier, verified run of a re-queued task) or a human's merge never matches."""
+    base_sha = str((_read_json(sdir / "meta.json") or {}).get("base_sha", ""))
+    parent2 = _git(root, "rev-parse", "--verify", "-q", "HEAD^2").stdout.strip()
+    tip = _git(root, "rev-parse", "--verify", "-q", f"refs/heads/{branch}").stdout.strip()
+    subject = _git(root, "log", "-1", "--format=%s", "HEAD").stdout.strip()
+    if (not base_sha or not parent2 or parent2 != tip
+            or subject != f"autobuild: merge {tid}"
+            # exit 1 = HEAD is not an ancestor of base_sha (made after the session started);
+            # 0 = it predates the session, 128 = base_sha unresolvable
+            or _git(root, "merge-base", "--is-ancestor", "HEAD", base_sha).returncode != 1):
+        return ""
+    return _git(root, "rev-parse", "HEAD^1").stdout.strip()
 
 
 def _undo_merge(paths: Paths, pre_merge_sha: str) -> None:
