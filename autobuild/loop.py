@@ -59,7 +59,7 @@ from .guards import (  # noqa: F401
 )
 from .integrate import (  # noqa: F401
     _open_pr,
-    _post_merge_verify,
+    _post_merge_checks_pass,
     _pr_create_is_permanent,
     _pr_exists,
     _push_branch,

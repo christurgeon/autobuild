@@ -163,19 +163,22 @@ Module responsibilities:
   before integrating) and `_write_checks_log`.
 - **`autobuild/integrate.py`** — `integrate` (`pr` / `auto-merge` / `branch`), the bounded
   push/PR retry-with-backoff helpers (`_push_branch`, `_open_pr`, permanent-failure classifiers),
-  and `_post_merge_verify` (the auto-merge combined-tree gate). Before an auto-merge, `integrate`
+  and `_post_merge_checks_pass` (the auto-merge combined-tree gate). Before an auto-merge, `integrate`
   raises `BaseBranchNotCheckedOut` if the main checkout is not on `base_branch`. `_undo_merge`
   undoes a merge that fails the post-merge checks with `git reset --merge` (fallback: reset the
   merge-footprint paths to HEAD, then `reset --merge` again; raises `MergeUndoFailed` to halt if
   that fails). It never uses `reset --hard`, which would revert uncommitted `tasks/` status.
-  A re-reap after a crash during the post-merge checks (after the merge, before the reaper's
-  `remove_worktree`/`delete_branch`; a crash after those is not covered) finds the earlier merge
-  (`_landed_merge`: a first-parent merge on base whose merged parent is the branch tip; full
-  history if the `base_sha` range fails), does not merge again, and re-runs the post-merge
-  checks. On failure it undoes to that merge's first parent if base is still on it. If later
-  commits sit on top, or a merge moved nothing ("Already up to date"), it never resets: it raises
-  `MergeUndoFailed`, or during a shutdown returns failure and leaves the merge on base for the
-  next run.
+  A merge that moved nothing ("Already up to date", e.g. no commits) writes no record; a failing
+  check then just blocks the task. A real merge is recorded in `<sdir>/merge.json`
+  (`pre_merge_sha`, `merge_sha`; atomic) before the checks, and removed after a successful undo.
+  A re-reap that finds it (`_reverify_merge`: the run died after the merge, before
+  `reaped.json`) never merges again and re-runs the checks. Pass: integrated. Fail with base still
+  on `merge_sha`: a plain `reset --merge` only (no footprint fallback, so a `tasks/` status write
+  since the crash is never discarded). Fail otherwise (later commits on top), or that reset
+  refuses: `MergeUndoFailed`, and `merge.json` is marked `failed` so a later re-reap blocks the
+  task instead of marking it done (during a shutdown: return failure, base keeps the merge until
+  the next run). `merge_sha` no longer on base (reset by hand): block, never re-merge. This only
+  covers merge handling: a crash after `file_followups` can still file follow-ups twice.
 - **`autobuild/reaper.py`** — `reap_session` / `_reap_session_locked` (under a per-session
   `_session_reap_lock`), `_handle_timeout`, `_requeue_fresh` (re-queue a killed session's task
   WITHOUT a `retries.json` entry — used for `INTERRUPTED`), `file_followups`, `reap_all` (takes
@@ -287,11 +290,11 @@ This is the part that requires reading multiple files to understand:
    fail, blocks the task and keeps the branch instead of integrating (trust, but verify). For
    `auto-merge` the reaper first requires `base_branch` to be checked out (else
    `BaseBranchNotCheckedOut` halts before the merge; the session stays reapable), and a second
-   gate (`_post_merge_verify`, opt-out `verify_after_merge`) re-runs the
+   gate (`_post_merge_checks_pass`, opt-out `verify_after_merge`) re-runs the
    checks against the **combined base tree** after the `--no-ff` merge and **undoes the merge with
    `git reset --merge`** if they fail (fallback: reset the merge-footprint paths to HEAD, then
    `reset --merge` again; halts with `MergeUndoFailed` if that fails; a re-reap after a crash
-   mid-checks reuses the merge already on base, see `integrate.py`) — catching semantic merge skew two independently-green
+   reuses the merge recorded in `merge.json`, see `integrate.py`) — catching semantic merge skew two independently-green
    branches can produce with no textual conflict. If they
    pass it **integrates** (`integrate` → `pr` via `gh` / `auto-merge` / `branch`) and only then
    `set_status`es the task `done` — so a failed auto-merge leaves the task `blocked`, not falsely
