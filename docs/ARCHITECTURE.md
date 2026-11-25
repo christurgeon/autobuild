@@ -126,3 +126,11 @@ branch — and therefore its PR — *contains its dependencies' commits*. For a 
 A → B → C you'll get stacked/overlapping diffs across the PRs. If you run a dependency
 chain in `pr` mode, review/merge the PRs in dependency order (or merge them onto an
 integration branch and open a single PR), rather than expecting independent diffs.
+
+**A force-kill during a reap is not fully crash-safe.** A run killed with SIGKILL, a
+crash, or power loss between integration and the `reaped.json` marker re-reaps that
+session on the next run. The re-reap can file the session's follow-ups a second time,
+or flip a `done` task to `blocked` when its worktree was already removed. Under
+`auto-merge`, a `base_branch` that itself fails the checks also blocks every later
+merge, and the harness does not detect a red base as such. The `autobuild-triage` skill
+lists the steps to find and fix these states by hand.

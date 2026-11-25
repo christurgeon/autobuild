@@ -297,7 +297,9 @@ This is the part that requires reading multiple files to understand:
    is blocked, and a warning names base's sha. Beyond that failing-checks case, a crash between
    merge and `reaped.json` needs no recovery: if the re-reap's checks pass, the task is marked
    `done` normally. Known limitation: if base itself fails the checks, every merge in the run
-   is undone and its task blocked; a red base is not detected as such. If the
+   is undone and its task blocked; a red base is not detected as such. A force-kill mid-reap
+   can also re-file follow-ups or flip a `done` task to `blocked`; the `autobuild-triage`
+   skill's "Recovering after a killed run" section gives the manual recovery. If the
    checks pass it **integrates** (`integrate` → `pr` via `gh` / `auto-merge` / `branch`) and only then
    `set_status`es the task `done` — so a failed auto-merge leaves the task `blocked`, not falsely
    `done`. `BLOCKED`/`NEEDS_HUMAN` set the task `blocked`; a synthetic `TIMEOUT` is never integrated
