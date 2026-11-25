@@ -57,8 +57,9 @@ in files and git — read it before proposing anything.
      instead of its own branch; `leak.json` lists the offending `commits`. In `auto-merge`
      this halts the run (`BaseBranchLeak`, exit 2) and re-fires every run until base is
      clean; in `pr`/`branch` it only blocks that task. Recover: move the leaked commit(s)
-     onto a branch and reset `base_branch` back (`git branch salvage <sha>; git reset --hard
-     <sha-before-leak>`), then re-queue the task (`status: todo`). If it was a *concurrent*
+     onto a branch and reset `base_branch` back (`git branch salvage <sha>; git reset --keep
+     <sha-before-leak>`), then re-queue the task (`status: todo`). `--keep` keeps
+     uncommitted `tasks/` status lines; `--hard` would discard them. If it was a *concurrent*
      human/CI commit (not a real escape), just keep it and re-queue the task.
 4. **Propose a concrete next action per task** — tie it to the cause: edit the task to
    clarify/scope it down and re-queue (set `status: todo`), split it into follow-ups, fix the config (raise `task_timeout_seconds`, correct a
